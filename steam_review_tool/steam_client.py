@@ -48,13 +48,18 @@ class SteamClient:
     def _get(self, url: str, **kwargs) -> requests.Response:
         """带重试的 GET 请求。
 
-        国内访问 api.steampowered.com 常有间歇性超时，这里做指数退避重试，
-        提升稳定性。超时时间每次重试递增，避免卡死。
+        - trust_env=False：忽略系统/环境变量里的代理配置，直接连接 Steam。
+          原因：Steam API 直连稳定可用，而用户机器上可能残留无效的
+          HTTP/SOCKS 代理配置（如 Clash/v2ray 等），走代理反而会导致
+          "Missing dependencies for SOCKS support" 或超时。
+        - 指数退避重试：国内访问 api.steampowered.com 常有间歇性超时。
         """
+        session = requests.Session()
+        session.trust_env = False  # 关键：忽略环境代理，直连
         last_exc: Exception | None = None
         for attempt in range(self.max_retries):
             try:
-                resp = requests.get(
+                resp = session.get(
                     url,
                     headers=HEADERS,
                     timeout=self.timeout * (attempt + 1),
@@ -62,7 +67,11 @@ class SteamClient:
                 )
                 resp.raise_for_status()
                 return resp
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            except (
+                requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.InvalidSchema,
+            ) as e:
                 last_exc = e
                 if attempt < self.max_retries - 1:
                     time.sleep(1.5 * (attempt + 1))
