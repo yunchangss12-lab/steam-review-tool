@@ -36,13 +36,39 @@ def get_api_key() -> str:
 
 
 def get_deepseek_key() -> str:
-    """DeepSeek API Key（用于差评 × 更新记录的语义比对归类）。"""
+    """大模型 API Key（用于差评 × 更新记录的语义比对归类）。"""
     return load_config().get("deepseek_api_key", "").strip()
 
 
 def get_llm_model() -> str:
     """语义比对所用的大模型名，默认 deepseek-chat（可自行改为 deepseek-v4-pro 等）。"""
     return load_config().get("llm_model", "deepseek-chat").strip() or "deepseek-chat"
+
+
+def get_llm_base_url() -> str:
+    """大模型接口 base_url（OpenAI 兼容），默认 DeepSeek。"""
+    return load_config().get("llm_base_url", "https://api.deepseek.com").strip() or "https://api.deepseek.com"
+
+
+def save_llm_config(api_key: str, base_url: str = "", model: str = "") -> bool:
+    """把大模型配置写回 config.local.json，供下次启动复用。
+
+    返回是否写入成功。仅在配置文件已存在或可创建时写入，失败静默返回 False。
+    """
+    path = _config_path()
+    try:
+        cfg = load_config()
+        if api_key:
+            cfg["deepseek_api_key"] = api_key
+        if base_url:
+            cfg["llm_base_url"] = base_url
+        if model:
+            cfg["llm_model"] = model
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        return True
+    except OSError:
+        return False
 
 
 def ensure_config_hint() -> None:

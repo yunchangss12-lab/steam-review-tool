@@ -23,7 +23,7 @@ DEEPSEEK_CHAT_URL = DEEPSEEK_BASE_URL + "/chat/completions"
 
 
 class InsufficientBalanceError(Exception):
-    """DeepSeek 账户余额不足（HTTP 402）。"""
+    """大模型账户余额不足（HTTP 402）。"""
 
     pass
 
@@ -74,18 +74,26 @@ def _safe_json(text: str) -> Optional[Any]:
 
 
 class LLMClassifier:
-    """用 DeepSeek 对差评做语义归类。"""
+    """用 OpenAI 兼容的大模型接口对差评做语义归类。
+
+    默认指向 DeepSeek，但 base_url / api_key / model 均可自定义，
+    兼容 DeepSeek / OpenAI / Kimi / 通义 / 本地 Ollama 等任何
+    OpenAI 兼容接口（只要提供 /chat/completions 端点）。
+    """
 
     def __init__(
         self,
         api_key: str,
         model: str = "deepseek-chat",
+        base_url: str = DEEPSEEK_BASE_URL,
         timeout: int = 60,
         max_retries: int = 2,
         max_tokens: int = 4096,
     ):
         self.api_key = api_key
         self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.chat_url = self.base_url + "/chat/completions"
         self.timeout = timeout
         self.max_retries = max_retries
         self.max_tokens = max_tokens
@@ -95,7 +103,7 @@ class LLMClassifier:
         return bool(self.api_key)
 
     def _chat(self, user_content: str) -> str:
-        """调用 DeepSeek 对话接口，返回模型文本；带重试。"""
+        """调用大模型对话接口，返回模型文本；带重试。"""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -114,7 +122,7 @@ class LLMClassifier:
         for attempt in range(self.max_retries):
             try:
                 resp = requests.post(
-                    DEEPSEEK_CHAT_URL,
+                    self.chat_url,
                     headers=headers,
                     json=payload,
                     timeout=self.timeout * (attempt + 1),
@@ -122,7 +130,7 @@ class LLMClassifier:
                 # 402 = 余额不足，重试无意义，直接抛友好错误
                 if resp.status_code == 402:
                     raise InsufficientBalanceError(
-                        "DeepSeek 账户余额不足（HTTP 402），请到 platform.deepseek.com 充值后重试"
+                        f"大模型账户余额不足（HTTP 402），请检查 {self.base_url} 对应账户的余额后重试"
                     )
                 resp.raise_for_status()
                 data = resp.json()

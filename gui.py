@@ -14,7 +14,13 @@ import traceback
 import webbrowser
 
 from steam_review_tool.classifier import NewsItem, ReviewItem, classify_all, summarize
-from steam_review_tool.config import get_api_key, get_deepseek_key, get_llm_model
+from steam_review_tool.config import (
+    get_api_key,
+    get_deepseek_key,
+    get_llm_model,
+    get_llm_base_url,
+    save_llm_config,
+)
 from steam_review_tool.llm_client import LLMClassifier
 from steam_review_tool.reporter import write_report
 from steam_review_tool.steam_client import SteamClient
@@ -28,9 +34,13 @@ def _fetch_task(
     date_start: int | None,
     date_end: int | None,
     outdir: str,
+    llm_config: dict,
     msg_q: queue.Queue,
 ) -> None:
-    """在后台线程里执行完整抓取+比对，进度经 msg_q 回传主线程。"""
+    """在后台线程里执行完整抓取+比对，进度经 msg_q 回传主线程。
+
+    llm_config: {"enabled": bool, "api_key": str, "base_url": str, "model": str}
+    """
     try:
         client = SteamClient(api_key=get_api_key())
 
@@ -89,13 +99,18 @@ def _fetch_task(
         msg_q.put(("log", f"      共获取 {len(news)} 条更新记录"))
 
         msg_q.put(("log", "[4/4] 语义比对归类（大模型分析差评问题与补丁修复的对应关系）..."))
-        llm = LLMClassifier(api_key=get_deepseek_key(), model=get_llm_model())
-        if llm.available:
-            results = classify_all(reviews, news, llm=llm)
+        llm = None
+        if llm_config.get("enabled") and llm_config.get("api_key"):
+            llm = LLMClassifier(
+                api_key=llm_config["api_key"],
+                base_url=llm_config.get("base_url") or "https://api.deepseek.com",
+                model=llm_config.get("model") or "deepseek-chat",
+            )
+            msg_q.put(("log", f"      已启用大模型语义判断（{llm.model}）"))
         else:
-            msg_q.put(("log", "      ⚠ 未配置 DeepSeek API Key，归类将全部标为「待确认」"))
-            msg_q.put(("log", "      （请在 config.local.json 填入 deepseek_api_key）"))
-            results = classify_all(reviews, news)
+            msg_q.put(("log", "      ⚠ 未启用大模型，归类将全部标为「待确认」"))
+            msg_q.put(("log", "      （在界面「大模型(可选)」区勾选并填写 API Key 即可启用）"))
+        results = classify_all(reviews, news, llm=llm)
         path = write_report(results, appid, title, outdir, "html")
 
         counts = summarize(results)
@@ -254,6 +269,54 @@ def build_app() -> "tk.Tk":
 
     range_combo.bind("<<ComboboxSelected>>", _on_range_change)
 
+    # ---------- 大模型（可选）配置区 ----------
+    # 启用开关 + base_url / api_key / model 输入框，全部自填；
+    # 不勾选或留空则走本地保守归类（全「待确认」）。
+    llm_card = tk.Frame(root, bg=card)
+    llm_card.pack(fill="x", padx=16, pady=(0, 8))
+
+    llm_header = tk.Frame(llm_card, bg=card)
+    llm_header.pack(fill="x", padx=16, pady=(10, 4))
+    llm_enabled_var = tk.BooleanVar(value=bool(get_deepseek_key()))
+    llm_check = tk.Checkbutton(
+        llm_header, text="启用大模型语义判断（分析差评问题 ↔ 补丁修复的对应关系）",
+        variable=llm_enabled_var, bg=card, fg=fg, font=label_font,
+        activebackground=card, anchor="w", cursor="hand2",
+    )
+    llm_check.pack(side="left")
+
+    llm_fields = tk.Frame(llm_card, bg=card)
+    llm_fields.pack(fill="x", padx=16, pady=(0, 10))
+
+    def _llm_label(parent, text, row):
+        tk.Label(parent, text=text, bg=card, fg=sub, font=("Microsoft YaHei", 9)).grid(
+            row=row, column=0, sticky="w", pady=3
+        )
+
+    _llm_label(llm_fields, "Base URL：", 0)
+    llm_base_url_var = tk.StringVar(value=get_llm_base_url())
+    tk.Entry(llm_fields, textvariable=llm_base_url_var, font=("Consolas", 9), width=46).grid(
+        row=0, column=1, sticky="w", pady=3
+    )
+
+    _llm_label(llm_fields, "API Key：", 1)
+    llm_api_key_var = tk.StringVar(value=get_deepseek_key())
+    tk.Entry(llm_fields, textvariable=llm_api_key_var, font=("Consolas", 9), width=46, show="").grid(
+        row=1, column=1, sticky="w", pady=3
+    )
+
+    _llm_label(llm_fields, "模型名：", 2)
+    llm_model_var = tk.StringVar(value=get_llm_model())
+    tk.Entry(llm_fields, textvariable=llm_model_var, font=("Consolas", 9), width=46).grid(
+        row=2, column=1, sticky="w", pady=3
+    )
+
+    tk.Label(
+        llm_fields,
+        text="支持 OpenAI 兼容接口（DeepSeek/Kimi/通义/Ollama 等）；留空 API Key 即不启用。填写会自动保存。",
+        bg=card, fg=sub, font=("Microsoft YaHei", 8),
+    ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
     # 按钮区
     btn_row = tk.Frame(root, bg=bg)
     btn_row.pack(fill="x", padx=16, pady=(0, 8))
@@ -325,6 +388,22 @@ def build_app() -> "tk.Tk":
                         return
         date_start, date_end = _resolve_date_range(range_var.get(), date_start_var.get(), date_end_var.get())
 
+        # 收集大模型配置（可选）
+        llm_enabled = bool(llm_enabled_var.get())
+        llm_config = {
+            "enabled": llm_enabled,
+            "api_key": llm_api_key_var.get().strip() if llm_enabled else "",
+            "base_url": llm_base_url_var.get().strip(),
+            "model": llm_model_var.get().strip(),
+        }
+        # 若启用了大模型，把配置保存到 config.local.json（下次启动自动回填）
+        if llm_enabled and llm_config["api_key"]:
+            save_llm_config(
+                llm_config["api_key"],
+                base_url=llm_config["base_url"],
+                model=llm_config["model"],
+            )
+
         result_path.clear()
         open_btn.configure(state="disabled")
         start_btn.configure(state="disabled")
@@ -334,7 +413,7 @@ def build_app() -> "tk.Tk":
         msg_q: queue.Queue = queue.Queue()
         t = threading.Thread(
             target=_fetch_task,
-            args=(appid, lang, date_start, date_end, "reports", msg_q),
+            args=(appid, lang, date_start, date_end, "reports", llm_config, msg_q),
             daemon=True,
         )
         t.start()

@@ -15,7 +15,13 @@ import argparse
 import sys
 
 from .classifier import ReviewItem, NewsItem, classify_all
-from .config import get_api_key, ensure_config_hint, get_deepseek_key, get_llm_model
+from .config import (
+    get_api_key,
+    ensure_config_hint,
+    get_deepseek_key,
+    get_llm_model,
+    get_llm_base_url,
+)
 from .llm_client import LLMClassifier
 from .reporter import write_report
 from .steam_client import SteamClient
@@ -98,11 +104,18 @@ def main(argv: list[str] | None = None) -> int:
     print(f"      共获取 {len(news)} 条更新记录")
 
     print("[4/4] 语义比对归类（大模型分析差评问题与补丁修复的对应关系）...")
-    llm = LLMClassifier(api_key=get_deepseek_key(), model=get_llm_model())
-    if not llm.available:
-        print("      ⚠ 未配置 DeepSeek API Key，归类将全部标为「待确认」")
+    llm = None
+    if get_deepseek_key():
+        llm = LLMClassifier(
+            api_key=get_deepseek_key(),
+            base_url=get_llm_base_url(),
+            model=get_llm_model(),
+        )
+        print(f"      已启用大模型语义判断（{get_llm_model()}）")
+    else:
+        print("      ⚠ 未启用大模型，归类将全部标为「待确认」")
         print("      （请在 config.local.json 填入 deepseek_api_key）")
-    results = classify_all(reviews, news, llm=llm if llm.available else None)
+    results = classify_all(reviews, news, llm=llm)
     path = write_report(results, args.appid, title, args.outdir, args.format)
     print(f"\n✓ 完成！报告已生成：{path}")
     print("  双击 HTML 文件即可在浏览器查看，按类别筛选后针对性写开发者回复。")
