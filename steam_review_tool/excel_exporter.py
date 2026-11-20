@@ -62,11 +62,12 @@ def export_excel(
     cat_color = {
         "已解决": "2e7d32",  # 绿
         "未解决": "d32f2f",  # 红
+        "情绪化评论": "7b1fa2",  # 紫
         "待确认": "f57f17",  # 橙
     }
 
     # 每个类别的行数据
-    categories = ["已解决", "未解决", "待确认"]
+    categories = ["已解决", "未解决", "情绪化评论", "待确认"]
     for cat in categories:
         group = [r for r in results if r.category == cat]
         ws = wb.create_sheet(title=cat)

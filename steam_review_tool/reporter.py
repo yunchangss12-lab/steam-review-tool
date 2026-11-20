@@ -36,10 +36,10 @@ def build_markdown(results: list[ClassifiedReview], appid: int) -> str:
     lines.append(f"\n> 生成时间：{dt.datetime.now().strftime('%Y-%m-%d %H:%M')}")
     lines.append(
         f"\n**统计**：已解决 {counts['已解决']} 条 · 未解决 {counts['未解决']} 条 · "
-        f"待确认 {counts['待确认']} 条 · 合计 {len(results)} 条\n"
+        f"情绪化评论 {counts['情绪化评论']} 条 · 待确认 {counts['待确认']} 条 · 合计 {len(results)} 条\n"
     )
 
-    order = ["已解决", "未解决", "待确认"]
+    order = ["已解决", "未解决", "情绪化评论", "待确认"]
     for cat in order:
         group = [r for r in results if r.category == cat]
         if not group:
@@ -69,7 +69,7 @@ def build_markdown(results: list[ClassifiedReview], appid: int) -> str:
 def build_html(results: list[ClassifiedReview], appid: int, title: str) -> str:
     counts = summarize(results)
     css = """
-    :root{--red:#d32f2f;--green:#2e7d32;--amber:#f57f17;--bg:#f7f7f8;--card:#fff;--line:#e5e5e5}
+    :root{--red:#d32f2f;--green:#2e7d32;--amber:#f57f17;--purple:#7b1fa2;--bg:#f7f7f8;--card:#fff;--line:#e5e5e5}
     *{box-sizing:border-box}
     body{margin:0;font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:var(--bg);color:#222}
     .wrap{max-width:960px;margin:0 auto;padding:24px 20px 60px}
@@ -79,7 +79,7 @@ def build_html(results: list[ClassifiedReview], appid: int, title: str) -> str:
     .stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 20px;min-width:120px}
     .stat b{display:block;font-size:26px}
     .stat span{font-size:13px;color:#777}
-    .solved b{color:var(--green)}.unsolved b{color:var(--red)}.pending b{color:var(--amber)}
+    .solved b{color:var(--green)}.unsolved b{color:var(--red)}.pending b{color:var(--amber)}.emotional b{color:var(--purple)}
     .filters{display:flex;gap:8px;margin-bottom:18px}
     .filters button{border:1px solid var(--line);background:#fff;border-radius:20px;padding:6px 14px;cursor:pointer;font-size:13px}
     .filters button.active{background:#222;color:#fff}
@@ -95,7 +95,7 @@ def build_html(results: list[ClassifiedReview], appid: int, title: str) -> str:
     .item .reply{margin-top:10px;font-size:13px;color:#1a1a1a;background:#fff8e1;border:1px solid #ffe0a3;border-left:3px solid #f5a623;padding:8px 12px;border-radius:6px;line-height:1.6}
     .item .reply .rhead{font-weight:700;color:#b26a00;display:block;margin-bottom:3px;font-size:12px}
     .tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:12px;color:#fff}
-    .tag.solved{background:var(--green)}.tag.unsolved{background:var(--red)}.tag.pending{background:var(--amber)}
+    .tag.solved{background:var(--green)}.tag.unsolved{background:var(--red)}.tag.pending{background:var(--amber)}.tag.emotional{background:var(--purple)}
     .link{font-size:12px;color:#1976d2;text-decoration:none}
     .empty{color:#999;font-size:14px}
     """
@@ -104,7 +104,7 @@ def build_html(results: list[ClassifiedReview], appid: int, title: str) -> str:
     for r in results:
         rev = r.review
         txt = esc(rev.review_text.strip())
-        tag_cls = {"已解决": "solved", "未解决": "unsolved", "待确认": "pending"}[r.category]
+        tag_cls = {"已解决": "solved", "未解决": "unsolved", "待确认": "pending", "情绪化评论": "emotional"}[r.category]
         url = _review_url(appid, rev.author)
 
         # 已解决：展示大模型给出的「问题↔修复」对应关系（解决依据）
@@ -159,6 +159,7 @@ def build_html(results: list[ClassifiedReview], appid: int, title: str) -> str:
       <div class="stats">
         <div class="stat solved"><b>{counts['已解决']}</b><span>已解决</span></div>
         <div class="stat unsolved"><b>{counts['未解决']}</b><span>未解决</span></div>
+        <div class="stat emotional"><b>{counts['情绪化评论']}</b><span>情绪化评论</span></div>
         <div class="stat pending"><b>{counts['待确认']}</b><span>待确认</span></div>
         <div class="stat"><b>{len(results)}</b><span>合计差评</span></div>
       </div>
@@ -166,6 +167,7 @@ def build_html(results: list[ClassifiedReview], appid: int, title: str) -> str:
         <button class="active" data-f="全部">全部</button>
         <button data-f="已解决">已解决</button>
         <button data-f="未解决">未解决</button>
+        <button data-f="情绪化评论">情绪化评论</button>
         <button data-f="待确认">待确认</button>
       </div>
       <div id="list">{''.join(rows)}</div>

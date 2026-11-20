@@ -1,10 +1,11 @@
 """核心比对归类逻辑。
 
 把每条历史差评与游戏更新记录（Patch Notes）做语义匹配，判断差评所反映的
-具体问题是否已经在后续某次更新中被真正修复，输出三分类：
+具体问题是否已经在后续某次更新中被真正修复，输出四分类：
   - 已解决：差评描述的具体问题，能被某条补丁中的具体修复内容对应上
   - 未解决：差评反映的是主观/设计类问题，或补丁没有针对该问题的修复
-  - 待确认：无法判断（差评无实质内容 / 补丁描述含糊 / 大模型不可用）
+  - 情绪化评论：纯情绪发泄/辱骂，无实质问题描述（安抚为主，不引导反馈 bug）
+  - 待确认：差评描述了具体问题但补丁含糊、或大模型判定失败，无法判断
 
 匹配策略（语义驱动，不再是关键词硬匹配）：
   1. 本地粗筛：判断差评是否有「实质问题」（纯情绪/无内容直接待确认）。
@@ -92,7 +93,7 @@ class NewsMatch:
 @dataclass
 class ClassifiedReview:
     review: ReviewItem
-    category: str  # 已解决 / 未解决 / 待确认
+    category: str  # 已解决 / 未解决 / 情绪化评论 / 待确认
     matched_news: list[NewsItem] = field(default_factory=list)
     matches: list[NewsMatch] = field(default_factory=list)  # 详细命中记录
     reason: str = ""  # 判定理由（大模型给出，供报告展示）
@@ -186,7 +187,7 @@ def _classify_with_llm(
         if v is None:
             out.append(ClassifiedReview(review, "待确认", [], [], ""))
             continue
-        category = v["verdict"] if v["verdict"] in ("已解决", "未解决", "待确认") else "待确认"
+        category = v["verdict"] if v["verdict"] in ("已解决", "未解决", "待确认", "情绪化评论") else "待确认"
         matched_news: list[NewsItem] = []
         matches: list[NewsMatch] = []
         news_idx = v.get("news_idx")
@@ -215,7 +216,7 @@ def _classify_fallback(
 
 
 def summarize(results: list[ClassifiedReview]) -> dict[str, int]:
-    counts = {"已解决": 0, "未解决": 0, "待确认": 0}
+    counts = {"已解决": 0, "未解决": 0, "情绪化评论": 0, "待确认": 0}
     for r in results:
         counts[r.category] += 1
     return counts
@@ -229,8 +230,11 @@ def generate_replies(
 ) -> int:
     """为归类结果生成推荐回复文案。
 
-    只对「已解决」和「待确认」的差评生成；「未解决」（设计/数值等主观问题）
-    不生成（保持 reply_suggestion 为空）。
+    只对「已解决」「情绪化评论」「待确认」的差评生成；「未解决」（设计/数值
+    等主观问题）不生成（保持 reply_suggestion 为空）。
+    - 已解决 → 告知已修复
+    - 情绪化评论 → 安抚为主，不引导反馈 bug
+    - 待确认 → 安抚 + 引导反馈
 
     cases_text:    自定义回复案例库文本；为空则用内置默认案例库。
     system_prompt: 自定义系统提示词；为空则用内置默认。

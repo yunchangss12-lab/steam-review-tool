@@ -522,7 +522,7 @@ def build_app() -> "tk.Tk":
                         _log("")
                         _log("=" * 50)
                         _log(f"✓ 完成！游戏：{payload['title']}")
-                        _log(f"  已解决 {c['已解决']} 条 · 未解决 {c['未解决']} 条 · 待确认 {c['待确认']} 条 · 合计 {payload['total']} 条")
+                        _log(f"  已解决 {c['已解决']} 条 · 未解决 {c['未解决']} 条 · 情绪化评论 {c.get('情绪化评论', 0)} 条 · 待确认 {c['待确认']} 条 · 合计 {payload['total']} 条")
                         _log(f"  报告文件：{payload['path']}")
                         _log("  点击「打开报告」在浏览器查看，或「导出 Excel」保存为表格。")
                         status_var.set("完成！可点击「打开报告」或「导出 Excel」。")
@@ -588,7 +588,7 @@ def build_app() -> "tk.Tk":
         # 判断是否有可生成回复的条目（非「未解决」）
         genable = [r for r in results if r.category != "未解决"]
         if not genable:
-            _log("  （无「已解决/待确认」的差评，跳过生成推荐回复）")
+            _log("  （无「已解决/情绪化评论/待确认」的差评，跳过生成推荐回复）")
             return
 
         # 记录是否已启用大模型
@@ -776,7 +776,7 @@ def build_app() -> "tk.Tk":
             head.pack(fill="x", padx=12, pady=(10, 2))
             # 差评摘要 + 类别标签
             summary = r.review.review_text.strip().replace("\n", " ")[:60]
-            tag_color = {"已解决": "#1e9b50", "未解决": "#c0392b", "待确认": "#e67e22"}.get(r.category, "#666")
+            tag_color = {"已解决": "#1e9b50", "未解决": "#c0392b", "情绪化评论": "#7b1fa2", "待确认": "#e67e22"}.get(r.category, "#666")
             tk.Label(
                 head, text=f"[{r.category}] {summary}", bg=card, fg=fg,
                 font=("Microsoft YaHei", 9, "bold"), anchor="w",
