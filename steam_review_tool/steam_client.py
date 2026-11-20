@@ -29,9 +29,9 @@ class SteamClient:
     def __init__(
         self,
         api_key: str = "",
-        timeout: int = 20,
+        timeout: int = 12,
         rate_limit: float = 1.0,
-        max_retries: int = 3,
+        max_retries: int = 2,
     ):
         self.api_key = api_key
         self.timeout = timeout
@@ -46,35 +46,39 @@ class SteamClient:
         self._last_request = time.time()
 
     def _get(self, url: str, **kwargs) -> requests.Response:
-        """带重试的 GET 请求。
+        """带重试与「代理/直连双通道」的 GET 请求。
 
-        - trust_env=False：忽略系统/环境变量里的代理配置，直接连接 Steam。
-          原因：Steam API 直连稳定可用，而用户机器上可能残留无效的
-          HTTP/SOCKS 代理配置（如 Clash/v2ray 等），走代理反而会导致
-          "Missing dependencies for SOCKS support" 或超时。
-        - 指数退避重试：国内访问 api.steampowered.com 常有间歇性超时。
+        策略：每个请求先走系统代理（trust_env=True），失败后回退直连
+        （trust_env=False）。这样无论用户开没开代理软件都能连上 Steam：
+        - 开了代理 → 走代理成功
+        - 没开/代理失效 → 回退直连成功
+        - 均失败 → 抛异常（由上层统一捕获，避免闪退）
+
+        同时指数退避重试，缓解国内访问 Steam API 的间歇性超时。
         """
-        session = requests.Session()
-        session.trust_env = False  # 关键：忽略环境代理，直连
         last_exc: Exception | None = None
-        for attempt in range(self.max_retries):
-            try:
-                resp = session.get(
-                    url,
-                    headers=HEADERS,
-                    timeout=self.timeout * (attempt + 1),
-                    **kwargs,
-                )
-                resp.raise_for_status()
-                return resp
-            except (
-                requests.exceptions.Timeout,
-                requests.exceptions.ConnectionError,
-                requests.exceptions.InvalidSchema,
-            ) as e:
-                last_exc = e
-                if attempt < self.max_retries - 1:
-                    time.sleep(1.5 * (attempt + 1))
+        # 通道顺序：先代理，后直连
+        for use_proxy in (True, False):
+            session = requests.Session()
+            session.trust_env = use_proxy
+            for attempt in range(self.max_retries):
+                try:
+                    resp = session.get(
+                        url,
+                        headers=HEADERS,
+                        timeout=self.timeout * (attempt + 1),
+                        **kwargs,
+                    )
+                    resp.raise_for_status()
+                    return resp
+                except (
+                    requests.exceptions.Timeout,
+                    requests.exceptions.ConnectionError,
+                    requests.exceptions.InvalidSchema,
+                ) as e:
+                    last_exc = e
+                    if attempt < self.max_retries - 1:
+                        time.sleep(1.5 * (attempt + 1))
         raise last_exc  # type: ignore[misc]
 
     def get_reviews(
