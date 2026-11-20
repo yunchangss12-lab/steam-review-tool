@@ -35,14 +35,32 @@ def get_api_key() -> str:
     return load_config().get("steam_web_api_key", "").strip()
 
 
+def get_deepseek_key() -> str:
+    """DeepSeek API Key（用于差评 × 更新记录的语义比对归类）。"""
+    return load_config().get("deepseek_api_key", "").strip()
+
+
+def get_llm_model() -> str:
+    """语义比对所用的大模型名，默认 deepseek-chat（可自行改为 deepseek-v4-pro 等）。"""
+    return load_config().get("llm_model", "deepseek-chat").strip() or "deepseek-chat"
+
+
 def ensure_config_hint() -> None:
     """提示用户如何配置 API Key（不泄露任何实际密钥）。"""
-    if get_api_key():
+    missing = []
+    if not get_api_key():
+        missing.append("Steam Web API Key（抓取更新记录用，可选）")
+    if not get_deepseek_key():
+        missing.append("DeepSeek API Key（差评语义比对归类用，推荐）")
+    if not missing:
         return
-    print(
-        "\n[提示] 未检测到 Steam Web API Key（可选）。\n"
-        "  使用更新记录（Patch Notes）比对功能需要它。\n"
-        f"  请在程序同目录创建 {CONFIG_FILENAME}，内容形如：\n"
-        '  {"steam_web_api_key": "你的KEY"}\n'
-        "  申请地址：https://steamcommunity.com/dev/apikey\n"
+    hint = "\n[提示] 未检测到以下 Key：\n"
+    for m in missing:
+        hint += f"  · {m}\n"
+    hint += (
+        f"  请在程序同目录创建/编辑 {CONFIG_FILENAME}，内容形如：\n"
+        '  {"steam_web_api_key": "你的SteamKey", "deepseek_api_key": "你的DeepSeekKey"}\n'
+        "  · Steam Key 申请：https://steamcommunity.com/dev/apikey\n"
+        "  · DeepSeek Key 申请：https://platform.deepseek.com\n"
     )
+    print(hint)

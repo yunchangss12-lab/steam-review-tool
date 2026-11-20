@@ -14,7 +14,8 @@ import traceback
 import webbrowser
 
 from steam_review_tool.classifier import NewsItem, ReviewItem, classify_all, summarize
-from steam_review_tool.config import get_api_key
+from steam_review_tool.config import get_api_key, get_deepseek_key, get_llm_model
+from steam_review_tool.llm_client import LLMClassifier
 from steam_review_tool.reporter import write_report
 from steam_review_tool.steam_client import SteamClient
 
@@ -87,8 +88,14 @@ def _fetch_task(
         ]
         msg_q.put(("log", f"      共获取 {len(news)} 条更新记录"))
 
-        msg_q.put(("log", "[4/4] 比对归类..."))
-        results = classify_all(reviews, news)
+        msg_q.put(("log", "[4/4] 语义比对归类（大模型分析差评问题与补丁修复的对应关系）..."))
+        llm = LLMClassifier(api_key=get_deepseek_key(), model=get_llm_model())
+        if llm.available:
+            results = classify_all(reviews, news, llm=llm)
+        else:
+            msg_q.put(("log", "      ⚠ 未配置 DeepSeek API Key，归类将全部标为「待确认」"))
+            msg_q.put(("log", "      （请在 config.local.json 填入 deepseek_api_key）"))
+            results = classify_all(reviews, news)
         path = write_report(results, appid, title, outdir, "html")
 
         counts = summarize(results)

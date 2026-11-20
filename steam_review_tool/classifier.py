@@ -1,51 +1,48 @@
 """核心比对归类逻辑。
 
-把每条历史差评与游戏更新记录（Patch Notes）做匹配，判断差评所反映的问题
-是否已经在后续某次更新中被解决，输出三分类：
-  - 已解决：差评时间之后存在更新，且更新内容命中该差评的关键词
-  - 未解决：差评时间之后没有匹配的更新，或明显仍存在的问题
-  - 待确认：无法自动判断（如更新内容含糊、关键词缺失）
+把每条历史差评与游戏更新记录（Patch Notes）做语义匹配，判断差评所反映的
+具体问题是否已经在后续某次更新中被真正修复，输出三分类：
+  - 已解决：差评描述的具体问题，能被某条补丁中的具体修复内容对应上
+  - 未解决：差评反映的是主观/设计类问题，或补丁没有针对该问题的修复
+  - 待确认：无法判断（差评无实质内容 / 补丁描述含糊 / 大模型不可用）
 
-匹配策略：
-  1. 提取差评文本中的关键词（命中问题词表）
-  2. 遍历差评发布时间之后的所有更新记录，做关键词 + 时间窗口匹配
-  3. 未命中关键词则归为「待确认」，交由人工判断
+匹配策略（语义驱动，不再是关键词硬匹配）：
+  1. 本地粗筛：判断差评是否有「实质问题」（纯情绪/无内容直接待确认）。
+  2. 大模型精判：把「差评具体问题 + 全部补丁正文」交给 DeepSeek，
+     要求其给出「问题 ↔ 修复」的具体对应关系，据此判定已解决/未解决/待确认。
+     全部补丁都参与匹配（不限时间段）。
+  3. 大模型不可用（无 Key / 调用失败）时，降级为保守的本地规则：
+     宁可判「待确认」，绝不因笼统的 bug/修复 字眼误判「已解决」。
+
+为什么不用关键词硬匹配：
+  - 「bug」「修复」「fix」这类词几乎每条补丁都有，无区分度，会导致海量误判。
+  - 只有语义层面理解「差评说的具体问题」和「补丁修的具体内容」是否一致，
+    才能得到可信的「已解决」结论。
 """
 
 import datetime as dt
-import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-# 问题关键词表：差评 → 对应的「已解决」信号词（出现在更新记录里）
-PROBLEM_KEYWORDS: dict[str, list[str]] = {
-    "闪退": ["闪退", "崩溃", "crash", "稳定性"],
-    "崩溃": ["崩溃", "闪退", "crash", "稳定性"],
-    "卡顿": ["卡顿", "掉帧", "性能", "帧率", "优化", "performance", "fps"],
-    "掉帧": ["掉帧", "卡顿", "性能", "帧率", "优化", "performance", "fps"],
-    "优化": ["优化", "性能", "performance", "帧率", "fps"],
-    "bug": ["bug", "修复", "fix", "修复了"],
-    "闪屏": ["闪屏", "画面", "显示", "黑屏", "白屏"],
-    "黑屏": ["黑屏", "白屏", "闪屏", "画面", "显示"],
-    "存档": ["存档", "存档损坏", "save", "存档丢失"],
-    "存档丢失": ["存档", "存档损坏", "save"],
-    "汉化": ["汉化", "中文", "本地化", "翻译", "localization"],
-    "中文": ["中文", "汉化", "本地化", "翻译", "localization"],
-    "翻译": ["翻译", "本地化", "汉化", "localization"],
-    "连接": ["连接", "网络", "服务器", "延迟", "掉线", "network", "server"],
-    "服务器": ["服务器", "连接", "网络", "延迟", "掉线", "server"],
-    "掉线": ["掉线", "连接", "网络", "服务器", "延迟"],
-    "延迟": ["延迟", "连接", "网络", "服务器", "ping"],
-    "手柄": ["手柄", "控制器", "controller", "gamepad", "摇杆"],
-    "控制器": ["控制器", "手柄", "controller", "gamepad"],
-    "加载": ["加载", "读取", "loading", "载入"],
-    "分辨率": ["分辨率", "画面", "显示", "resolution", "4k"],
-    "帧数": ["帧数", "帧率", "fps", "性能", "优化"],
-    "反作弊": ["反作弊", "anti-cheat", "作弊", "封禁"],
-    "封禁": ["封禁", "反作弊", "ban", "误封"],
-    "登录": ["登录", "登陆", "login", "账号"],
-    "更新": ["更新", "补丁", "patch", "版本"],
-}
+from .llm_client import LLMClassifier, build_news_dicts, build_review_dicts
+
+# 补丁预筛关键词：只保留「更新日志/补丁」类新闻作为候选，过滤节日祝福、
+# 销量庆祝、展会宣传、合作公告等与 bug 修复无关的营销贴。
+# 注意：这里只做「内容相关性」过滤，不做「时间段」过滤（全部时间都参与）。
+PATCH_TITLE_HINTS = (
+    "update notes",
+    "update",
+    "patch",
+    "bug fix",
+    "hotfix",
+    "hot fix",
+    "更新",
+    "补丁",
+    "修复",
+    "维护",
+    "优化",
+    "平衡性",
+)
 
 
 @dataclass
@@ -82,105 +79,138 @@ class NewsItem:
 
 @dataclass
 class NewsMatch:
-    """一次「差评关键词 → 补丁内容」的命中记录，供报告展示归类依据。"""
+    """一次「差评问题 → 补丁修复」的语义对应记录，供报告展示归类依据。
+
+    与旧版不同，这里不再记录「关键词 + 信号词」的硬命中，而是记录大模型
+    给出的「具体问题 ↔ 具体修复」对应关系。
+    """
 
     news: NewsItem
-    keyword: str  # 差评中命中的问题关键词
-    signal: str  # 补丁中命中的解决信号词
-    snippet: str  # 补丁内容中命中处的上下文片段（便于人工复核）
+    reason: str = ""  # 大模型给出的一句话判定理由
 
 
 @dataclass
 class ClassifiedReview:
     review: ReviewItem
     category: str  # 已解决 / 未解决 / 待确认
-    matched_keywords: list[str] = field(default_factory=list)
     matched_news: list[NewsItem] = field(default_factory=list)
     matches: list[NewsMatch] = field(default_factory=list)  # 详细命中记录
+    reason: str = ""  # 判定理由（大模型给出，供报告展示）
 
 
-def extract_keywords(text: str) -> list[str]:
-    """从差评文本中提取命中的问题关键词（去重）。"""
-    found: list[str] = []
-    for keyword in PROBLEM_KEYWORDS:
-        if keyword.lower() in text.lower():
-            found.append(keyword)
-    return found
+def _filter_patch_news(news_items: list[NewsItem]) -> list[NewsItem]:
+    """预筛补丁：只保留标题含「更新/补丁/修复」等关键字的新闻。
 
-
-def classify_review(
-    review: ReviewItem, news_items: list[NewsItem]
-) -> ClassifiedReview:
-    """对单条差评做归类。
-
-    仅考虑差评发布时间之后、且时间窗口内（默认 90 天）的更新记录，
-    避免拿很久以前的更新硬套。
+    目的是过滤掉节日祝福、销量庆祝、展会宣传、合作公告等与 bug 修复无关的
+    营销贴，避免喂给大模型造成干扰与浪费。时间段不做限制（全部参与）。
     """
-    keywords = extract_keywords(review.review_text)
-
-    # 没有可识别的问题关键词 → 待确认
-    if not keywords:
-        return ClassifiedReview(review, "待确认", keywords, [])
-
-    # 差评之后 90 天内的更新
-    window_end = review.created_at + 90 * 24 * 3600
-    later_news = [
-        n for n in news_items if review.created_at <= n.date <= window_end
-    ]
-
-    # 用关键词对应的「解决信号词」去匹配更新内容，并记录具体命中详情
-    matched_news: list[NewsItem] = []
-    matches: list[NewsMatch] = []
-    # 差评命中的信号词集合（问题关键词 → 对应解决信号词）
-    signal_map: dict[str, list[str]] = {
-        kw: PROBLEM_KEYWORDS.get(kw, [kw]) for kw in keywords
-    }
-
-    for news in later_news:
-        haystack = (news.title + " " + news.contents).lower()
-        for kw in keywords:
-            for sig in signal_map[kw]:
-                pos = haystack.find(sig.lower())
-                if pos != -1:
-                    snippet = _extract_snippet(news.contents, sig)
-                    matches.append(NewsMatch(news, kw, sig, snippet))
-                    if news not in matched_news:
-                        matched_news.append(news)
-                    break  # 该关键词命中即可，换下一个关键词
-
-    if matched_news:
-        return ClassifiedReview(review, "已解决", keywords, matched_news, matches)
-
-    # 有后续更新但都没命中 → 未解决
-    if later_news:
-        return ClassifiedReview(review, "未解决", keywords, [])
-
-    # 差评之后没有任何更新 → 待确认（可能问题仍存在，需人工核实）
-    return ClassifiedReview(review, "待确认", keywords, [])
-
-
-def _extract_snippet(contents: str, signal: str, radius: int = 40) -> str:
-    """从补丁正文中截取命中信号词附近的一段文字，用于展示归类依据。"""
-    if not contents:
-        return ""
-    low = contents.lower()
-    pos = low.find(signal.lower())
-    if pos == -1:
-        return contents[: radius * 2].strip()
-    start = max(0, pos - radius)
-    end = min(len(contents), pos + len(signal) + radius)
-    snippet = contents[start:end].strip()
-    if start > 0:
-        snippet = "…" + snippet
-    if end < len(contents):
-        snippet = snippet + "…"
-    return snippet
+    filtered: list[NewsItem] = []
+    for n in news_items:
+        title_low = n.title.lower()
+        if any(hint in title_low for hint in PATCH_TITLE_HINTS):
+            filtered.append(n)
+    # 若预筛后为空（极少数游戏标题不规范），回退为全部
+    return filtered if filtered else list(news_items)
 
 
 def classify_all(
-    reviews: list[ReviewItem], news_items: list[NewsItem]
+    reviews: list[ReviewItem],
+    news_items: list[NewsItem],
+    llm: Optional[LLMClassifier] = None,
+    batch_size: int = 10,
 ) -> list[ClassifiedReview]:
-    return [classify_review(r, news_items) for r in reviews]
+    """对全部差评做归类。
+
+    llm: 已初始化的大模型分类器。若为 None 或不可用，则走保守本地降级。
+    news_items 全部参与匹配（不限时间段——补丁修复不区分差评前后）。
+    """
+    # 排序补丁（升序），便于后续按差评时间过滤
+    news_sorted = sorted(news_items, key=lambda n: n.date)
+    # 预筛：过滤与修复无关的营销贴（不按时间过滤）
+    news_candidates = _filter_patch_news(news_sorted)
+
+    # 若大模型可用，走语义精判
+    if llm is not None and llm.available:
+        try:
+            return _classify_with_llm(reviews, news_candidates, llm, batch_size)
+        except Exception as e:
+            # 大模型调用失败 → 降级到保守本地规则，并附上失败原因
+            return _classify_fallback(reviews, news_candidates, reason=str(e))
+
+    return _classify_fallback(reviews, news_candidates)
+
+
+def _classify_with_llm(
+    reviews: list[ReviewItem],
+    news_sorted: list[NewsItem],
+    llm: LLMClassifier,
+    batch_size: int,
+) -> list[ClassifiedReview]:
+    """大模型语义精判（分批调用，避免单次请求过长）。"""
+    review_dicts = build_review_dicts(reviews)
+    news_dicts = build_news_dicts(news_sorted)
+    # news_dicts 的 idx 对应 news_sorted 的下标
+
+    verdicts: dict[int, dict] = {}
+
+    for start in range(0, len(review_dicts), batch_size):
+        batch = review_dicts[start:start + batch_size]
+        try:
+            results = llm.classify_batch(batch, news_dicts)
+        except Exception:
+            results = []
+        if not results:
+            # 该批调用失败：这批全部落为待确认
+            for r in batch:
+                verdicts[r["id"]] = {
+                    "verdict": "待确认",
+                    "news_idx": -1,
+                    "reason": "（大模型判定失败，需人工复核）",
+                }
+            continue
+        for res in results:
+            rid = res.get("id")
+            if rid is None:
+                continue
+            verdicts[int(rid)] = {
+                "verdict": str(res.get("verdict", "待确认")),
+                "news_idx": res.get("news_idx", -1),
+                "reason": str(res.get("reason", "")),
+            }
+
+    # 汇总为 ClassifiedReview
+    out: list[ClassifiedReview] = []
+    for i, review in enumerate(reviews):
+        v = verdicts.get(i)
+        if v is None:
+            out.append(ClassifiedReview(review, "待确认", [], [], ""))
+            continue
+        category = v["verdict"] if v["verdict"] in ("已解决", "未解决", "待确认") else "待确认"
+        matched_news: list[NewsItem] = []
+        matches: list[NewsMatch] = []
+        news_idx = v.get("news_idx")
+        if category == "已解决" and isinstance(news_idx, int) and 0 <= news_idx < len(news_sorted):
+            n = news_sorted[news_idx]
+            matched_news.append(n)
+            matches.append(NewsMatch(news=n, reason=v["reason"]))
+        out.append(ClassifiedReview(review, category, matched_news, matches, v["reason"]))
+    return out
+
+
+def _classify_fallback(
+    reviews: list[ReviewItem], news_sorted: list[NewsItem], reason: str = ""
+) -> list[ClassifiedReview]:
+    """大模型不可用时的保守降级：一律判「待确认」，绝不误判「已解决」。
+
+    这样做的原因：本地关键词匹配（尤其是 bug/修复 这类词）不可靠，
+    与其给出大量错误的「已解决」，不如保守地交给人工。
+    """
+    msg = reason or "（未配置大模型或调用失败，需人工复核）"
+    out: list[ClassifiedReview] = []
+    for review in reviews:
+        # 纯情绪/无实质内容的差评也归「待确认」
+        out.append(ClassifiedReview(review, "待确认", [], [], msg))
+    return out
 
 
 def summarize(results: list[ClassifiedReview]) -> dict[str, int]:

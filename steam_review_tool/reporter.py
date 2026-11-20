@@ -50,15 +50,15 @@ def build_markdown(results: list[ClassifiedReview], appid: int) -> str:
             text = rev.review_text.strip().replace("\n", " ")[:200]
             lines.append(f"### {i}. {_fmt_time(rev.created_at)} · 玩家 {rev.display_name}")
             lines.append(f"> {text}")
-            if r.matched_keywords:
-                lines.append(f"- 命中问题：{', '.join(r.matched_keywords)}")
-            # 已解决：展示匹配到的补丁内容片段，便于复核归类是否准确
+            # 已解决：展示大模型给出的「问题↔修复」对应关系（解决依据）
             for m in r.matches:
                 news_title = m.news.title.strip()
-                snippet = m.snippet.strip().replace("\n", " ")
-                lines.append(f"- 解决依据：[{news_title}] 命中「{m.signal}」")
-                if snippet:
-                    lines.append(f"  - {snippet}")
+                lines.append(f"- 解决依据：[{news_title}]")
+                if m.reason:
+                    lines.append(f"  - {m.reason}")
+            # 未解决/待确认：展示判定理由（如有）
+            if r.reason and cat != "已解决":
+                lines.append(f"- 判定：{r.reason}")
             lines.append(f"- 评测链接：{_review_url(appid, rev.author)}\n")
     return "\n".join(lines)
 
@@ -99,26 +99,29 @@ def build_html(results: list[ClassifiedReview], appid: int, title: str) -> str:
     for r in results:
         rev = r.review
         txt = esc(rev.review_text.strip())
-        kw = ", ".join(esc(k) for k in r.matched_keywords)
         tag_cls = {"已解决": "solved", "未解决": "unsolved", "待确认": "pending"}[r.category]
         url = _review_url(appid, rev.author)
 
-        # 已解决：展示匹配到的补丁内容片段（解决依据），便于人工复核
+        # 已解决：展示大模型给出的「问题↔修复」对应关系（解决依据）
         news_blocks = ""
         if r.matches:
             blocks = []
             for m in r.matches:
                 ntitle = esc(m.news.title.strip())
-                sig = esc(m.signal)
-                snip = esc(m.snippet.strip())
+                reason = esc(m.reason.strip()) if m.reason else ""
                 blocks.append(
                     f"<div class='news'>"
                     f"<span class='nhead'>解决依据：{ntitle}</span>"
-                    f"<span>（命中「{sig}」）</span>"
-                    + (f"<span class='snip'>{snip}</span>" if snip else "")
+                    + (f"<span class='snip'>{reason}</span>" if reason else "")
                     + "</div>"
                 )
             news_blocks = "".join(blocks)
+        elif r.reason and r.category != "已解决":
+            # 未解决/待确认：展示判定理由
+            reason = esc(r.reason.strip())
+            news_blocks = (
+                f"<div class='news'><span class='snip'>{reason}</span></div>"
+            )
 
         rows.append(
             f"""
@@ -128,7 +131,6 @@ def build_html(results: list[ClassifiedReview], appid: int, title: str) -> str:
             <span class="tag {tag_cls}">{esc(r.category)}</span>
           </div>
           <div class="txt">{txt}</div>
-          {"<div class='kw'>命中问题：" + kw + "</div>" if kw else ""}
           {news_blocks}
           <div><a class='link' href='{url}' target='_blank' rel='noopener'>前往该条评测回复 ↗</a></div>
         </div>"""
