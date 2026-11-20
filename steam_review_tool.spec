@@ -1,8 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-# Steam 差评比对工具打包入口（双击启动，无需命令行）
+# Steam 差评比对工具打包入口（图形界面 GUI，双击启动）
 a = Analysis(
-    ['launcher.py'],
+    ['gui.py'],
     pathex=['.'],
     binaries=[],
     datas=[],
@@ -28,7 +28,7 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,          # 保留控制台，便于交互输入 AppID
+    console=False,         # windowed 模式：不弹黑色控制台窗口
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
