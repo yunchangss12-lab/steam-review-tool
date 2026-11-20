@@ -26,10 +26,17 @@ HEADERS = {"User-Agent": "SteamReviewTool/1.0 (developer support tool)"}
 
 
 class SteamClient:
-    def __init__(self, api_key: str = "", timeout: int = 15, rate_limit: float = 1.0):
+    def __init__(
+        self,
+        api_key: str = "",
+        timeout: int = 20,
+        rate_limit: float = 1.0,
+        max_retries: int = 3,
+    ):
         self.api_key = api_key
         self.timeout = timeout
         self.rate_limit = rate_limit  # 请求间隔，避免触发限流
+        self.max_retries = max_retries  # 网络抖动时自动重试次数
         self._last_request = 0.0
 
     def _throttle(self) -> None:
@@ -37,6 +44,29 @@ class SteamClient:
         if elapsed < self.rate_limit:
             time.sleep(self.rate_limit - elapsed)
         self._last_request = time.time()
+
+    def _get(self, url: str, **kwargs) -> requests.Response:
+        """带重试的 GET 请求。
+
+        国内访问 api.steampowered.com 常有间歇性超时，这里做指数退避重试，
+        提升稳定性。超时时间每次重试递增，避免卡死。
+        """
+        last_exc: Exception | None = None
+        for attempt in range(self.max_retries):
+            try:
+                resp = requests.get(
+                    url,
+                    headers=HEADERS,
+                    timeout=self.timeout * (attempt + 1),
+                    **kwargs,
+                )
+                resp.raise_for_status()
+                return resp
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                last_exc = e
+                if attempt < self.max_retries - 1:
+                    time.sleep(1.5 * (attempt + 1))
+        raise last_exc  # type: ignore[misc]
 
     def get_reviews(
         self,
@@ -76,13 +106,10 @@ class SteamClient:
                 "cursor": cursor,
             }
             self._throttle()
-            resp = requests.get(
+            resp = self._get(
                 REVIEWS_API,
                 params={"input_json": json.dumps(payload)},
-                headers=HEADERS,
-                timeout=self.timeout,
             )
-            resp.raise_for_status()
             data = resp.json()
             resp_body = data.get("response", {})
             reviews.extend(resp_body.get("reviews", []))
@@ -94,10 +121,7 @@ class SteamClient:
     def get_app_details(self, appid: int) -> Optional[dict]:
         params = {"appids": appid, "l": "schinese", "cc": "cn"}
         self._throttle()
-        resp = requests.get(
-            APPDETAIL_API, params=params, headers=HEADERS, timeout=self.timeout
-        )
-        resp.raise_for_status()
+        resp = self._get(APPDETAIL_API, params=params)
         data = resp.json()
         if data and str(appid) in data and data[str(appid)].get("success"):
             return data[str(appid)]["data"]
@@ -114,10 +138,7 @@ class SteamClient:
             "format": "json",
         }
         self._throttle()
-        resp = requests.get(
-            NEWS_API, params=params, headers=HEADERS, timeout=self.timeout
-        )
-        resp.raise_for_status()
+        resp = self._get(NEWS_API, params=params)
         data = resp.json()
         items = (
             data.get("appnews", {}).get("newsitems", [])
