@@ -51,15 +51,21 @@ PROBLEM_KEYWORDS: dict[str, list[str]] = {
 @dataclass
 class ReviewItem:
     appid: int
-    author: str
+    author: str  # 作者 steamid（用于生成评测直链）
     review_text: str
     created_at: int  # unix 秒
     voted_up: bool
     recommendationid: str
+    author_name: str = ""  # 作者昵称（用于展示）
 
     @property
     def created_dt(self) -> dt.datetime:
         return dt.datetime.fromtimestamp(self.created_at)
+
+    @property
+    def display_name(self) -> str:
+        """展示用的作者名：优先昵称，否则用 steamid 简写。"""
+        return self.author_name or (self.author[:8] + "…" if self.author else "匿名")
 
 
 @dataclass
@@ -75,11 +81,22 @@ class NewsItem:
 
 
 @dataclass
+class NewsMatch:
+    """一次「差评关键词 → 补丁内容」的命中记录，供报告展示归类依据。"""
+
+    news: NewsItem
+    keyword: str  # 差评中命中的问题关键词
+    signal: str  # 补丁中命中的解决信号词
+    snippet: str  # 补丁内容中命中处的上下文片段（便于人工复核）
+
+
+@dataclass
 class ClassifiedReview:
     review: ReviewItem
     category: str  # 已解决 / 未解决 / 待确认
     matched_keywords: list[str] = field(default_factory=list)
     matched_news: list[NewsItem] = field(default_factory=list)
+    matches: list[NewsMatch] = field(default_factory=list)  # 详细命中记录
 
 
 def extract_keywords(text: str) -> list[str]:
@@ -111,18 +128,28 @@ def classify_review(
         n for n in news_items if review.created_at <= n.date <= window_end
     ]
 
-    # 用关键词对应的「解决信号词」去匹配更新内容
+    # 用关键词对应的「解决信号词」去匹配更新内容，并记录具体命中详情
     matched_news: list[NewsItem] = []
+    matches: list[NewsMatch] = []
+    # 差评命中的信号词集合（问题关键词 → 对应解决信号词）
+    signal_map: dict[str, list[str]] = {
+        kw: PROBLEM_KEYWORDS.get(kw, [kw]) for kw in keywords
+    }
+
     for news in later_news:
         haystack = (news.title + " " + news.contents).lower()
-        signal_words = set()
         for kw in keywords:
-            signal_words.update(PROBLEM_KEYWORDS.get(kw, [kw]))
-        if any(sig.lower() in haystack for sig in signal_words):
-            matched_news.append(news)
+            for sig in signal_map[kw]:
+                pos = haystack.find(sig.lower())
+                if pos != -1:
+                    snippet = _extract_snippet(news.contents, sig)
+                    matches.append(NewsMatch(news, kw, sig, snippet))
+                    if news not in matched_news:
+                        matched_news.append(news)
+                    break  # 该关键词命中即可，换下一个关键词
 
     if matched_news:
-        return ClassifiedReview(review, "已解决", keywords, matched_news)
+        return ClassifiedReview(review, "已解决", keywords, matched_news, matches)
 
     # 有后续更新但都没命中 → 未解决
     if later_news:
@@ -130,6 +157,24 @@ def classify_review(
 
     # 差评之后没有任何更新 → 待确认（可能问题仍存在，需人工核实）
     return ClassifiedReview(review, "待确认", keywords, [])
+
+
+def _extract_snippet(contents: str, signal: str, radius: int = 40) -> str:
+    """从补丁正文中截取命中信号词附近的一段文字，用于展示归类依据。"""
+    if not contents:
+        return ""
+    low = contents.lower()
+    pos = low.find(signal.lower())
+    if pos == -1:
+        return contents[: radius * 2].strip()
+    start = max(0, pos - radius)
+    end = min(len(contents), pos + len(signal) + radius)
+    snippet = contents[start:end].strip()
+    if start > 0:
+        snippet = "…" + snippet
+    if end < len(contents):
+        snippet = snippet + "…"
+    return snippet
 
 
 def classify_all(

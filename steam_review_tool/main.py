@@ -69,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
         ReviewItem(
             appid=args.appid,
             author=r.get("author", {}).get("steamid", "匿名"),
+            author_name=r.get("author", {}).get("personaname", ""),
             review_text=r.get("review", ""),
             created_at=int(r.get("timestamp_created", 0)),
             voted_up=bool(r.get("voted_up", False)),

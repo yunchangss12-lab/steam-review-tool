@@ -17,8 +17,15 @@ def _fmt_time(ts: int) -> str:
     return dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
 
 
-def _review_url(appid: int, rec_id: str) -> str:
-    # Steam 评测详情页锚点（reviewid 为 64 位时需转 decimal，这里给个可访问的通用链接）
+def _review_url(appid: int, author_steamid: str) -> str:
+    """生成 Steam 单条评测的直链，直接定位到该玩家对该游戏的评测。
+
+    格式：https://steamcommunity.com/profiles/{steamid}/recommended/{appid}/
+    这能精确跳转到该玩家写的这条评测（而非评测列表页），省去手动筛选。
+    """
+    if author_steamid:
+        return f"https://steamcommunity.com/profiles/{author_steamid}/recommended/{appid}/"
+    # 兜底：没有 steamid 时跳到评测列表页
     return f"https://steamcommunity.com/app/{appid}/reviews/"
 
 
@@ -41,14 +48,18 @@ def build_markdown(results: list[ClassifiedReview], appid: int) -> str:
         for i, r in enumerate(group, 1):
             rev = r.review
             text = rev.review_text.strip().replace("\n", " ")[:200]
-            lines.append(f"### {i}. {_fmt_time(rev.created_at)} · 玩家 {rev.author}")
+            lines.append(f"### {i}. {_fmt_time(rev.created_at)} · 玩家 {rev.display_name}")
             lines.append(f"> {text}")
             if r.matched_keywords:
                 lines.append(f"- 命中问题：{', '.join(r.matched_keywords)}")
-            if r.matched_news:
-                news_titles = [n.title for n in r.matched_news]
-                lines.append(f"- 相关更新：{', '.join(news_titles)}")
-            lines.append(f"- 评测链接：{_review_url(appid, rev.recommendationid)}\n")
+            # 已解决：展示匹配到的补丁内容片段，便于复核归类是否准确
+            for m in r.matches:
+                news_title = m.news.title.strip()
+                snippet = m.snippet.strip().replace("\n", " ")
+                lines.append(f"- 解决依据：[{news_title}] 命中「{m.signal}」")
+                if snippet:
+                    lines.append(f"  - {snippet}")
+            lines.append(f"- 评测链接：{_review_url(appid, rev.author)}\n")
     return "\n".join(lines)
 
 
@@ -75,6 +86,9 @@ def build_html(results: list[ClassifiedReview], appid: int, title: str) -> str:
     .item .head{display:flex;justify-content:space-between;gap:10px;font-size:13px;color:#777;margin-bottom:6px;flex-wrap:wrap}
     .item .txt{font-size:14px;line-height:1.6;white-space:pre-wrap}
     .item .kw{margin-top:8px;font-size:12px;color:#555}
+    .item .news{margin-top:8px;font-size:12px;color:#555}
+    .item .news .nhead{font-weight:600;color:#333}
+    .item .news .snip{display:block;background:#f2f7f3;border-left:3px solid var(--green);padding:6px 10px;margin-top:4px;border-radius:4px;color:#444;line-height:1.5;font-size:12px}
     .tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:12px;color:#fff}
     .tag.solved{background:var(--green)}.tag.unsolved{background:var(--red)}.tag.pending{background:var(--amber)}
     .link{font-size:12px;color:#1976d2;text-decoration:none}
@@ -86,20 +100,37 @@ def build_html(results: list[ClassifiedReview], appid: int, title: str) -> str:
         rev = r.review
         txt = esc(rev.review_text.strip())
         kw = ", ".join(esc(k) for k in r.matched_keywords)
-        news = ", ".join(esc(n.title) for n in r.matched_news)
         tag_cls = {"已解决": "solved", "未解决": "unsolved", "待确认": "pending"}[r.category]
-        url = _review_url(appid, rev.recommendationid)
+        url = _review_url(appid, rev.author)
+
+        # 已解决：展示匹配到的补丁内容片段（解决依据），便于人工复核
+        news_blocks = ""
+        if r.matches:
+            blocks = []
+            for m in r.matches:
+                ntitle = esc(m.news.title.strip())
+                sig = esc(m.signal)
+                snip = esc(m.snippet.strip())
+                blocks.append(
+                    f"<div class='news'>"
+                    f"<span class='nhead'>解决依据：{ntitle}</span>"
+                    f"<span>（命中「{sig}」）</span>"
+                    + (f"<span class='snip'>{snip}</span>" if snip else "")
+                    + "</div>"
+                )
+            news_blocks = "".join(blocks)
+
         rows.append(
             f"""
         <div class="item" data-cat="{r.category}">
           <div class="head">
-            <span>{esc(_fmt_time(rev.created_at))} · 玩家 {esc(rev.author)}</span>
+            <span>{esc(_fmt_time(rev.created_at))} · 玩家 {esc(rev.display_name)}</span>
             <span class="tag {tag_cls}">{esc(r.category)}</span>
           </div>
           <div class="txt">{txt}</div>
           {"<div class='kw'>命中问题：" + kw + "</div>" if kw else ""}
-          {"<div class='kw'>相关更新：" + news + "</div>" if news else ""}
-          <div><a class='link' href='{url}' target='_blank' rel='noopener'>前往评测页回复 ↗</a></div>
+          {news_blocks}
+          <div><a class='link' href='{url}' target='_blank' rel='noopener'>前往该条评测回复 ↗</a></div>
         </div>"""
         )
 
