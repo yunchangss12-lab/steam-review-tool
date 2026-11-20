@@ -2,8 +2,8 @@
 
 # Steam 差评比对工具打包入口（双击启动，无需命令行）
 a = Analysis(
-    ['steam_review_tool/launcher.py'],
-    pathex=[],
+    ['launcher.py'],
+    pathex=['.'],
     binaries=[],
     datas=[],
     hiddenimports=[],
