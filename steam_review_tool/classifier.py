@@ -96,6 +96,7 @@ class ClassifiedReview:
     matched_news: list[NewsItem] = field(default_factory=list)
     matches: list[NewsMatch] = field(default_factory=list)  # 详细命中记录
     reason: str = ""  # 判定理由（大模型给出，供报告展示）
+    reply_suggestion: str = ""  # 推荐回复文案（大模型生成，未解决为空）
 
 
 def _filter_patch_news(news_items: list[NewsItem]) -> list[NewsItem]:
@@ -218,3 +219,37 @@ def summarize(results: list[ClassifiedReview]) -> dict[str, int]:
     for r in results:
         counts[r.category] += 1
     return counts
+
+
+def generate_replies(
+    results: list[ClassifiedReview],
+    llm: Optional[LLMClassifier],
+) -> int:
+    """为归类结果生成推荐回复文案。
+
+    只对「已解决」和「待确认」的差评生成；「未解决」（设计/数值等主观问题）
+    不生成（保持 reply_suggestion 为空）。
+
+    逐条调用大模型，生成结果写回每个 ClassifiedReview.reply_suggestion。
+    返回成功生成的条数。
+    """
+    if llm is None or not llm.available:
+        return 0
+
+    count = 0
+    for r in results:
+        if r.category == "未解决":
+            continue  # 未解决不生成回复
+        try:
+            reply = llm.generate_reply(
+                r.review.review_text,
+                r.category,
+                r.reason,
+            )
+            if reply:
+                r.reply_suggestion = reply
+                count += 1
+        except Exception:
+            # 单条失败不影响整体，继续下一条
+            continue
+    return count

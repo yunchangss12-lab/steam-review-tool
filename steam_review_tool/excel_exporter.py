@@ -27,7 +27,7 @@ def _safe_filename(s: str, maxlen: int = 40) -> str:
 
 
 # 表头
-HEADERS = ["序号", "差评日期", "玩家", "差评内容", "归类", "解决依据 / 判定理由", "评测链接"]
+HEADERS = ["序号", "差评日期", "玩家", "差评内容", "归类", "解决依据 / 判定理由", "推荐回复文案", "评测链接"]
 
 
 def _review_url(appid: int, author_steamid: str) -> str:
@@ -104,6 +104,7 @@ def export_excel(
                 rev.review_text.strip(),
                 cat,
                 reason_text,
+                r.reply_suggestion,  # 推荐回复文案（未解决为空）
                 _review_url(rev.appid, rev.author),
             ]
             for col, val in enumerate(row_vals, 1):
@@ -111,7 +112,7 @@ def export_excel(
                 cell.alignment = wrap
 
     # 列宽
-    col_widths = [6, 12, 14, 60, 8, 50, 40]
+    col_widths = [6, 12, 14, 60, 8, 50, 50, 40]
     for ws in wb.worksheets:
         for idx, w in enumerate(col_widths, 1):
             ws.column_dimensions[get_column_letter(idx)].width = w

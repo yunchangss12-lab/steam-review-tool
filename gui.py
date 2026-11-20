@@ -113,6 +113,15 @@ def _fetch_task(
             msg_q.put(("log", "      ⚠ 未启用大模型，归类将全部标为「待确认」"))
             msg_q.put(("log", "      （在界面「大模型(可选)」区勾选并填写 API Key 即可启用）"))
         results = classify_all(reviews, news, llm=llm)
+
+        # 生成推荐回复文案（已解决/待确认生成，未解决跳过）
+        reply_count = 0
+        if llm is not None and llm.available:
+            from steam_review_tool.classifier import generate_replies
+            msg_q.put(("log", "      正在生成推荐回复文案（参照官方回复案例）..."))
+            reply_count = generate_replies(results, llm)
+            msg_q.put(("log", f"      已生成 {reply_count} 条推荐回复（未解决不生成）"))
+
         path = write_report(results, appid, title, outdir, "html", range_label=range_label)
 
         counts = summarize(results)

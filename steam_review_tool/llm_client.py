@@ -188,6 +188,84 @@ class LLMClassifier:
             return []
         return parsed["results"]
 
+    def generate_reply(
+        self,
+        review_text: str,
+        category: str,
+        reason: str = "",
+    ) -> str:
+        """为单条差评生成一条推荐回复文案。
+
+        仅对「已解决」和「待确认」生成；「未解决」（设计/数值等主观问题）
+        不生成回复（调用方应跳过）。
+
+        category: 已解决 / 未解决 / 待确认
+        reason:   归类时大模型给出的判定理由（已解决=具体修复内容，待确认=判定理由）
+        返回回复文案文本；失败返回空串。
+        """
+        # 未解决不生成回复
+        if category == "未解决":
+            return ""
+
+        from .reply_templates import build_reply_cases_text, REPLY_SYSTEM_PROMPT
+
+        # 根据类别定制指令
+        if category == "已解决":
+            instruction = (
+                "这条差评反映的问题已经被某次游戏更新修复了。"
+                "请据此撰写回复：先致歉，再告知问题已在更新中修复、感谢反馈。"
+                "可结合下面给出的「判定理由」中提到的具体修复内容来措辞。"
+            )
+        else:  # 待确认
+            instruction = (
+                "这条差评反映的问题暂时无法确认是否已解决。"
+                "请据此撰写回复：先致歉/安抚，再表示已收到反馈、会尽快排查，"
+                "必要时引导玩家通过客服邮箱 lostcastle2@hunterstudio.cn 反馈详情。"
+            )
+
+        cases_text = build_reply_cases_text()
+        user_content = (
+            f"{instruction}\n\n"
+            f"===== 官方历史回复案例（请严格参照其语气和措辞风格）=====\n{cases_text}\n\n"
+            f"===== 待回复的差评 =====\n{review_text}\n\n"
+            f"===== 归类判定理由（供参考）=====\n{reason or '（无）'}\n\n"
+            "请直接输出回复文案正文，不要任何解释或标记。"
+        )
+
+        # 用自定义 system prompt 调用（覆盖默认的归类 prompt）
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": REPLY_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0.3,
+            "stream": False,
+            "max_tokens": 1024,
+        }
+        try:
+            resp = requests.post(
+                self.chat_url,
+                headers=headers,
+                json=payload,
+                timeout=self.timeout,
+            )
+            if resp.status_code == 402:
+                raise InsufficientBalanceError(
+                    f"大模型账户余额不足（HTTP 402），请检查 {self.base_url} 对应账户的余额后重试"
+                )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"].strip()
+        except InsufficientBalanceError:
+            raise
+        except Exception:
+            return ""
+
 
 def build_review_dicts(reviews) -> list[dict]:
     """把 ReviewItem 列表转成 LLM 入参格式。"""

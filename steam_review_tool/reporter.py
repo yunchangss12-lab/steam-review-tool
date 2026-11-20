@@ -59,6 +59,9 @@ def build_markdown(results: list[ClassifiedReview], appid: int) -> str:
             # 未解决/待确认：展示判定理由（如有）
             if r.reason and cat != "已解决":
                 lines.append(f"- 判定：{r.reason}")
+            # 推荐回复文案（未解决不生成）
+            if r.reply_suggestion:
+                lines.append(f"- 推荐回复：{r.reply_suggestion}")
             lines.append(f"- 评测链接：{_review_url(appid, rev.author)}\n")
     return "\n".join(lines)
 
@@ -89,6 +92,8 @@ def build_html(results: list[ClassifiedReview], appid: int, title: str) -> str:
     .item .news{margin-top:8px;font-size:12px;color:#555}
     .item .news .nhead{font-weight:600;color:#333}
     .item .news .snip{display:block;background:#f2f7f3;border-left:3px solid var(--green);padding:6px 10px;margin-top:4px;border-radius:4px;color:#444;line-height:1.5;font-size:12px}
+    .item .reply{margin-top:10px;font-size:13px;color:#1a1a1a;background:#fff8e1;border:1px solid #ffe0a3;border-left:3px solid #f5a623;padding:8px 12px;border-radius:6px;line-height:1.6}
+    .item .reply .rhead{font-weight:700;color:#b26a00;display:block;margin-bottom:3px;font-size:12px}
     .tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:12px;color:#fff}
     .tag.solved{background:var(--green)}.tag.unsolved{background:var(--red)}.tag.pending{background:var(--amber)}
     .link{font-size:12px;color:#1976d2;text-decoration:none}
@@ -123,6 +128,16 @@ def build_html(results: list[ClassifiedReview], appid: int, title: str) -> str:
                 f"<div class='news'><span class='snip'>{reason}</span></div>"
             )
 
+        # 推荐回复文案（未解决不生成）
+        reply_block = ""
+        if r.reply_suggestion:
+            reply_block = (
+                f"<div class='reply'>"
+                f"<span class='rhead'>💬 推荐回复文案</span>"
+                f"{esc(r.reply_suggestion)}"
+                f"</div>"
+            )
+
         rows.append(
             f"""
         <div class="item" data-cat="{r.category}">
@@ -132,6 +147,7 @@ def build_html(results: list[ClassifiedReview], appid: int, title: str) -> str:
           </div>
           <div class="txt">{txt}</div>
           {news_blocks}
+          {reply_block}
           <div><a class='link' href='{url}' target='_blank' rel='noopener'>前往该条评测回复 ↗</a></div>
         </div>"""
         )
