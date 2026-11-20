@@ -167,21 +167,49 @@ def build_html(results: list[ClassifiedReview], appid: int, title: str) -> str:
     return f"<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{esc(title)}</title><style>{css}</style></head><body>{body}</body></html>"
 
 
+def _safe_filename(s: str, maxlen: int = 40) -> str:
+    """把字符串清理为合法的文件名片段（去掉 Windows 非法字符）。"""
+    if not s:
+        return ""
+    # 去掉文件名里不允许的字符
+    for ch in '\\/:*?"<>|':
+        s = s.replace(ch, "_")
+    s = s.strip().strip(".").strip()
+    # 去掉多余空格
+    s = " ".join(s.split())
+    return s[:maxlen]
+
+
 def write_report(
     results: list[ClassifiedReview],
     appid: int,
     title: str,
     output_dir: str = "reports",
     fmt: str = "html",
+    range_label: str = "",
 ) -> str:
+    """生成报告文件。
+
+    文件名格式（HTML）：{游戏名}_{时间段}_{查询日期}_{差评总数}.html
+    range_label: 时间段文案（如「最近30天」「全部时间」），空则省略该段。
+    """
     os.makedirs(output_dir, exist_ok=True)
-    ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = dt.datetime.now().strftime("%Y%m%d")
+    count = len(results)
+    # 组装文件名片段
+    parts = [_safe_filename(title)]
+    if range_label:
+        parts.append(_safe_filename(range_label))
+    parts.append(ts)
+    parts.append(str(count))
+    name = "_".join(p for p in parts if p)
+
     if fmt == "html":
-        path = os.path.join(output_dir, f"report_{appid}_{ts}.html")
+        path = os.path.join(output_dir, f"{name}.html")
         with open(path, "w", encoding="utf-8") as f:
             f.write(build_html(results, appid, title))
     else:
-        path = os.path.join(output_dir, f"report_{appid}_{ts}.md")
+        path = os.path.join(output_dir, f"{name}.md")
         with open(path, "w", encoding="utf-8") as f:
             f.write(build_markdown(results, appid))
     return path

@@ -35,11 +35,13 @@ def _fetch_task(
     date_end: int | None,
     outdir: str,
     llm_config: dict,
+    range_label: str,
     msg_q: queue.Queue,
 ) -> None:
     """在后台线程里执行完整抓取+比对，进度经 msg_q 回传主线程。
 
     llm_config: {"enabled": bool, "api_key": str, "base_url": str, "model": str}
+    range_label: 时间段文案（用于日志与文件名）。
     """
     try:
         client = SteamClient(api_key=get_api_key())
@@ -111,7 +113,7 @@ def _fetch_task(
             msg_q.put(("log", "      ⚠ 未启用大模型，归类将全部标为「待确认」"))
             msg_q.put(("log", "      （在界面「大模型(可选)」区勾选并填写 API Key 即可启用）"))
         results = classify_all(reviews, news, llm=llm)
-        path = write_report(results, appid, title, outdir, "html")
+        path = write_report(results, appid, title, outdir, "html", range_label=range_label)
 
         counts = summarize(results)
         msg_q.put(("done", {
@@ -119,6 +121,8 @@ def _fetch_task(
             "path": os.path.abspath(path),
             "counts": counts,
             "total": len(results),
+            "results": results,  # 供导出 Excel 使用
+            "range_label": range_label,
         }))
     except Exception as e:  # noqa: BLE001
         msg_q.put(("error", f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"))
@@ -331,6 +335,12 @@ def build_app() -> "tk.Tk":
         state="disabled",
     )
     open_btn.pack(side="left", padx=10)
+    export_btn = tk.Button(
+        btn_row, text="导出 Excel", bg="#ffffff", fg=fg,
+        font=btn_font, padx=20, pady=6, relief="flat", cursor="hand2",
+        state="disabled",
+    )
+    export_btn.pack(side="left")
 
     # 状态标签
     status_var = tk.StringVar(value="就绪。请填写 AppID 后点击「开始抓取」。")
@@ -357,8 +367,9 @@ def build_app() -> "tk.Tk":
         log_text.see("end")
         log_text.configure(state="disabled")
 
-    # 结果缓存（供「打开报告」使用）
+    # 结果缓存（供「打开报告」「导出 Excel」使用）
     result_path: list[str] = []
+    result_data: list = []  # 保存 (title, range_label, results) 供导出
 
     def _on_start() -> None:
         raw = appid_var.get().strip()
@@ -388,6 +399,15 @@ def build_app() -> "tk.Tk":
                         return
         date_start, date_end = _resolve_date_range(range_var.get(), date_start_var.get(), date_end_var.get())
 
+        # 生成时间段文案（用于文件名）
+        range_choice = range_var.get()
+        if range_choice == "自定义日期":
+            ds = date_start_var.get().strip() or "不限"
+            de = date_end_var.get().strip() or "不限"
+            range_label = f"{ds}至{de}"
+        else:
+            range_label = range_choice
+
         # 收集大模型配置（可选）
         llm_enabled = bool(llm_enabled_var.get())
         llm_config = {
@@ -405,7 +425,9 @@ def build_app() -> "tk.Tk":
             )
 
         result_path.clear()
+        result_data.clear()
         open_btn.configure(state="disabled")
+        export_btn.configure(state="disabled")
         start_btn.configure(state="disabled")
         status_var.set("正在抓取，请稍候（网络不稳时会自动重试）...")
         progress.start(10)
@@ -413,7 +435,7 @@ def build_app() -> "tk.Tk":
         msg_q: queue.Queue = queue.Queue()
         t = threading.Thread(
             target=_fetch_task,
-            args=(appid, lang, date_start, date_end, "reports", llm_config, msg_q),
+            args=(appid, lang, date_start, date_end, "reports", llm_config, range_label, msg_q),
             daemon=True,
         )
         t.start()
@@ -428,15 +450,21 @@ def build_app() -> "tk.Tk":
                         progress.stop()
                         start_btn.configure(state="normal")
                         open_btn.configure(state="normal")
+                        export_btn.configure(state="normal")
                         result_path.append(payload["path"])
+                        result_data.append({
+                            "title": payload["title"],
+                            "range_label": payload.get("range_label", ""),
+                            "results": payload["results"],
+                        })
                         c = payload["counts"]
                         _log("")
                         _log("=" * 50)
                         _log(f"✓ 完成！游戏：{payload['title']}")
                         _log(f"  已解决 {c['已解决']} 条 · 未解决 {c['未解决']} 条 · 待确认 {c['待确认']} 条 · 合计 {payload['total']} 条")
                         _log(f"  报告文件：{payload['path']}")
-                        _log("  点击下方「打开报告」在浏览器查看，按类别筛选后针对性写开发者回复。")
-                        status_var.set("完成！可点击「打开报告」查看结果。")
+                        _log("  点击「打开报告」在浏览器查看，或「导出 Excel」保存为表格。")
+                        status_var.set("完成！可点击「打开报告」或「导出 Excel」。")
                         return
                     elif kind == "error":
                         progress.stop()
@@ -454,8 +482,23 @@ def build_app() -> "tk.Tk":
         if result_path:
             webbrowser.open("file://" + result_path[0])
 
+    def _on_export() -> None:
+        if not result_data:
+            status_var.set("⚠ 暂无结果，请先「开始抓取」。")
+            return
+        from steam_review_tool.excel_exporter import export_excel
+        d = result_data[-1]
+        try:
+            path = export_excel(d["results"], d["title"], d["range_label"], "reports")
+            status_var.set(f"已导出 Excel：{path}")
+            _log(f"\n✓ 已导出 Excel：{path}")
+        except Exception as e:  # noqa: BLE001
+            status_var.set(f"⚠ 导出失败：{e}")
+            _log(f"\n[出错] 导出 Excel 失败：{e}")
+
     start_btn.configure(command=_on_start)
     open_btn.configure(command=_on_open)
+    export_btn.configure(command=_on_export)
 
     return root
 

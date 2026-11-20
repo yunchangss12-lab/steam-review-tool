@@ -116,7 +116,8 @@ def main(argv: list[str] | None = None) -> int:
         print("      ⚠ 未启用大模型，归类将全部标为「待确认」")
         print("      （请在 config.local.json 填入 deepseek_api_key）")
     results = classify_all(reviews, news, llm=llm)
-    path = write_report(results, args.appid, title, args.outdir, args.format)
+    range_label = f"{args.start or '不限'}至{args.end or '不限'}" if (args.start or args.end) else ""
+    path = write_report(results, args.appid, title, args.outdir, args.format, range_label=range_label)
     print(f"\n✓ 完成！报告已生成：{path}")
     print("  双击 HTML 文件即可在浏览器查看，按类别筛选后针对性写开发者回复。")
     return 0
