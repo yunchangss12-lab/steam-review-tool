@@ -21,7 +21,14 @@ from steam_review_tool.steam_client import SteamClient
 
 # ---------- 抓取任务（后台线程） ----------
 
-def _fetch_task(appid: int, lang: str, pages: int, outdir: str, msg_q: queue.Queue) -> None:
+def _fetch_task(
+    appid: int,
+    lang: str,
+    date_start: int | None,
+    date_end: int | None,
+    outdir: str,
+    msg_q: queue.Queue,
+) -> None:
     """在后台线程里执行完整抓取+比对，进度经 msg_q 回传主线程。"""
     try:
         client = SteamClient(api_key=get_api_key())
@@ -31,9 +38,23 @@ def _fetch_task(appid: int, lang: str, pages: int, outdir: str, msg_q: queue.Que
         title = details.get("name", f"AppID {appid}") if details else f"AppID {appid}"
         msg_q.put(("log", f"      游戏：{title}"))
 
-        msg_q.put(("log", f"[2/4] 抓取历史差评（最多 {pages * 100} 条）..."))
+        # 时间范围描述（用于日志）
+        import datetime as _dt
+        _fmt = lambda ts: _dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else "不限"
+        if date_start is None and date_end is None:
+            rng_desc = "全部时间"
+        else:
+            rng_desc = f"{_fmt(date_start)} ~ {_fmt(date_end)}"
+
+        msg_q.put(("log", f"[2/4] 抓取差评（时间范围：{rng_desc}）..."))
         raw_reviews = client.get_reviews(
-            appid, language=lang, review_type="negative", num_per_page=100, max_pages=pages
+            appid,
+            language=lang,
+            review_type="negative",
+            num_per_page=100,
+            max_pages=200,
+            date_start=date_start,
+            date_end=date_end,
         )
         reviews = [
             ReviewItem(
@@ -74,6 +95,53 @@ def _fetch_task(appid: int, lang: str, pages: int, outdir: str, msg_q: queue.Que
         }))
     except Exception as e:  # noqa: BLE001
         msg_q.put(("error", f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"))
+
+
+# ---------- 时间范围解析 ----------
+
+def _resolve_date_range(
+    range_choice: str, start_str: str, end_str: str
+) -> tuple[int | None, int | None]:
+    """把「时间段选择 + 自定义日期」解析成 (date_start, date_end) Unix 时间戳。
+
+    返回 (None, None) 表示「全部时间」（不加时间过滤）。
+    """
+    import datetime as _dt
+    import time as _time
+
+    now = int(_time.time())
+    day = 86400
+
+    preset_days = {
+        "最近7天": 7,
+        "最近30天": 30,
+        "最近90天": 90,
+        "最近半年": 182,
+        "最近一年": 365,
+    }
+
+    if range_choice in preset_days:
+        return now - preset_days[range_choice] * day, now
+
+    if range_choice == "全部时间":
+        return None, None
+
+    # 自定义日期
+    def _parse(s: str) -> int | None:
+        s = s.strip()
+        if not s:
+            return None
+        try:
+            return int(_dt.datetime.strptime(s, "%Y-%m-%d").timestamp())
+        except ValueError:
+            return None
+
+    ds = _parse(start_str)
+    de = _parse(end_str)
+    # 结束日期若填了，取当天末尾（23:59:59）
+    if de is not None:
+        de = de + day - 1
+    return ds, de
 
 
 # ---------- 主窗口 ----------
@@ -134,17 +202,45 @@ def build_app() -> "tk.Tk":
     lang_combo.current(0)
     lang_combo.grid(row=1, column=1, sticky="w", pady=6)
 
-    _label(form, "抓取页数：", 2)
-    pages_var = tk.StringVar(value="10")
-    tk.Spinbox(form, from_=1, to=100, textvariable=pages_var, font=label_font, width=18).grid(
-        row=2, column=1, sticky="w", pady=6
+    _label(form, "时间范围：", 2)
+    range_var = tk.StringVar(value="最近30天")
+    range_combo = ttk.Combobox(
+        form, textvariable=range_var, font=label_font, width=17, state="readonly",
+        values=["最近7天", "最近30天", "最近90天", "最近半年", "最近一年", "全部时间", "自定义日期"],
     )
+    range_combo.current(1)
+    range_combo.grid(row=2, column=1, sticky="w", pady=6)
 
     tk.Label(
         form,
-        text="每页 100 条；可抓全量历史差评（页数越多越全，耗时越长）",
+        text="按时间段筛选差评，可针对性查看某版本更新前后的反馈",
         bg=card, fg=sub, font=("Microsoft YaHei", 8),
     ).grid(row=3, column=1, sticky="w", padx=(0, 16), pady=(0, 8))
+
+    # 自定义日期行（默认隐藏，选「自定义日期」时显示）
+    date_frame = tk.Frame(form, bg=card)
+    date_frame.grid(row=4, column=0, columnspan=2, sticky="w", padx=(16, 16), pady=(0, 10))
+    tk.Label(date_frame, text="起：", bg=card, fg=fg, font=label_font).pack(side="left")
+    date_start_var = tk.StringVar(value="")
+    date_start_entry = tk.Entry(date_frame, textvariable=date_start_var, font=label_font, width=12)
+    date_start_entry.pack(side="left", padx=(0, 12))
+    tk.Label(date_frame, text="止：", bg=card, fg=fg, font=label_font).pack(side="left")
+    date_end_var = tk.StringVar(value="")
+    date_end_entry = tk.Entry(date_frame, textvariable=date_end_var, font=label_font, width=12)
+    date_end_entry.pack(side="left")
+    tk.Label(
+        date_frame, text="（格式 YYYY-MM-DD，可留空=不限）",
+        bg=card, fg=sub, font=("Microsoft YaHei", 8),
+    ).pack(side="left", padx=10)
+    date_frame.grid_remove()  # 默认隐藏
+
+    def _on_range_change(_event=None):
+        if range_var.get() == "自定义日期":
+            date_frame.grid()
+        else:
+            date_frame.grid_remove()
+
+    range_combo.bind("<<ComboboxSelected>>", _on_range_change)
 
     # 按钮区
     btn_row = tk.Frame(root, bg=bg)
@@ -203,11 +299,19 @@ def build_app() -> "tk.Tk":
         }
         lang = lang_map.get(lang_var.get(), "schinese")
 
-        try:
-            pages = int(pages_var.get())
-            pages = max(1, min(100, pages))
-        except ValueError:
-            pages = 10
+        # 解析时间范围
+        if range_var.get() == "自定义日期":
+            # 校验日期格式（若填写则必须是 YYYY-MM-DD）
+            import datetime as _dt
+            for _label_txt, _val in (("起", date_start_var.get()), ("止", date_end_var.get())):
+                _v = _val.strip()
+                if _v:
+                    try:
+                        _dt.datetime.strptime(_v, "%Y-%m-%d")
+                    except ValueError:
+                        status_var.set(f"⚠ 日期格式错误：{_label_txt}日期「{_v}」应为 YYYY-MM-DD。")
+                        return
+        date_start, date_end = _resolve_date_range(range_var.get(), date_start_var.get(), date_end_var.get())
 
         result_path.clear()
         open_btn.configure(state="disabled")
@@ -218,7 +322,7 @@ def build_app() -> "tk.Tk":
         msg_q: queue.Queue = queue.Queue()
         t = threading.Thread(
             target=_fetch_task,
-            args=(appid, lang, pages, "reports", msg_q),
+            args=(appid, lang, date_start, date_end, "reports", msg_q),
             daemon=True,
         )
         t.start()

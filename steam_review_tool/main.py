@@ -1,12 +1,13 @@
 """命令行主入口。
 
 用法：
-    python -m steam_review_tool.main --appid 570 --lang schinese [--pages 20] [--format html]
+    python -m steam_review_tool.main --appid 570 --lang schinese [--start 2026-01-01] [--end 2026-06-30] [--format html]
 
 参数说明：
     --appid   Steam 游戏 AppID（必填）
     --lang    评测语言过滤，默认 all（如 schinese / english）
-    --pages   最多抓取的差评页数，每页 100 条，默认 20
+    --start   起始日期（含），格式 YYYY-MM-DD，默认不限
+    --end     结束日期（含），格式 YYYY-MM-DD，默认不限
     --format  报告格式：html（默认）/ md
 """
 
@@ -19,14 +20,31 @@ from .reporter import write_report
 from .steam_client import SteamClient
 
 
+def _parse_date(s: str) -> int | None:
+    """把 YYYY-MM-DD 解析成 Unix 时间戳；空串返回 None。"""
+    if not s:
+        return None
+    import datetime as _dt
+    try:
+        return int(_dt.datetime.strptime(s, "%Y-%m-%d").timestamp())
+    except ValueError:
+        raise SystemExit(f"日期格式错误：{s!r}，应为 YYYY-MM-DD")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Steam 差评 × 更新记录比对归类工具")
     parser.add_argument("--appid", type=int, required=True, help="Steam 游戏 AppID")
     parser.add_argument("--lang", default="all", help="评测语言，如 schinese/english")
-    parser.add_argument("--pages", type=int, default=20, help="抓取差评页数（每页100条）")
+    parser.add_argument("--start", default="", help="起始日期 YYYY-MM-DD（含，默认不限）")
+    parser.add_argument("--end", default="", help="结束日期 YYYY-MM-DD（含，默认不限）")
     parser.add_argument("--format", default="html", choices=["html", "md"], help="报告格式")
     parser.add_argument("--outdir", default="reports", help="报告输出目录")
     args = parser.parse_args(argv)
+
+    date_start = _parse_date(args.start)
+    date_end = _parse_date(args.end)
+    if date_end is not None:
+        date_end += 86400 - 1  # 结束日期取当天末尾
 
     ensure_config_hint()
     client = SteamClient(api_key=get_api_key())
@@ -36,13 +54,16 @@ def main(argv: list[str] | None = None) -> int:
     title = details.get("name", f"AppID {args.appid}") if details else f"AppID {args.appid}"
     print(f"      游戏：{title}")
 
-    print(f"[2/4] 抓取历史差评（最多 {args.pages * 100} 条）...")
+    rng_desc = f"{args.start or '不限'} ~ {args.end or '不限'}"
+    print(f"[2/4] 抓取差评（时间范围：{rng_desc}）...")
     raw_reviews = client.get_reviews(
         args.appid,
         language=args.lang,
         review_type="negative",
         num_per_page=100,
-        max_pages=args.pages,
+        max_pages=200,
+        date_start=date_start,
+        date_end=date_end,
     )
     reviews = [
         ReviewItem(

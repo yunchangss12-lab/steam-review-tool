@@ -95,18 +95,26 @@ class SteamClient:
         language: str = "all",
         review_type: str = "negative",
         num_per_page: int = 100,
-        max_pages: int = 100,
+        max_pages: int = 200,
+        date_start: Optional[int] = None,
+        date_end: Optional[int] = None,
     ) -> list[dict]:
         """分页拉取评测（社区内部 ajaxappreviews 接口，全量历史）。
 
         review_type: "negative"（差评）/ "positive"（好评）/ "all"
         返回按时间倒序的评测列表（最新在前）。
 
+        date_start / date_end: Unix 时间戳，限定评测创建时间范围（含边界）。
+        两者都为 None 时抓全量历史；只给 date_start 表示「从该时间至今」；
+        只给 date_end 表示「从最早到该时间」。内部转成接口的
+        start_date/end_date/date_range_type=include 参数。
+
         为什么不用官方 GetAppReviews：
           - 官方接口 filter=recent 会硬性 day_range_used=30，只返回最近 30 天，
             历史差评（游戏可能有几千条）根本拉不到。
           - 社区内部接口 /ajaxappreviews/:appid 是商店/社区页面实际使用的接口，
-            能通过 cursor 翻页拿到「全量历史评测」，无 30 天窗口限制。
+            能通过 cursor 翻页拿到「全量历史评测」，无 30 天窗口限制，
+            且支持 start_date/end_date 精确时间范围过滤。
         """
         reviews: list[dict] = []
         cursor = "*"
@@ -122,6 +130,15 @@ class SteamClient:
                 "cursor": cursor,
                 "filter": "recent",  # 按创建时间倒序，可完整遍历到空列表
             }
+            # 时间范围过滤（仅当至少有一个时间边界时启用）
+            # 注意：接口要求 start_date 与 end_date 必须成对出现才生效，
+            # 只传其一会被忽略。因此缺省一侧时补全边界：
+            #   start 缺失 -> 0（最早）；end 缺失 -> 当前时间（最新）。
+            if date_start is not None or date_end is not None:
+                params["date_range_type"] = "include"
+                params["start_date"] = int(date_start) if date_start is not None else 0
+                params["end_date"] = int(date_end) if date_end is not None else int(time.time())
+
             self._throttle()
             resp = self._get(url, params=params)
             data = resp.json()
