@@ -193,6 +193,8 @@ class LLMClassifier:
         review_text: str,
         category: str,
         reason: str = "",
+        cases_text: str = "",
+        system_prompt: str = "",
     ) -> str:
         """为单条差评生成一条推荐回复文案。
 
@@ -201,6 +203,8 @@ class LLMClassifier:
 
         category: 已解决 / 未解决 / 待确认
         reason:   归类时大模型给出的判定理由（已解决=具体修复内容，待确认=判定理由）
+        cases_text:   自定义回复案例库文本；为空则用内置默认案例库。
+        system_prompt: 自定义系统提示词；为空则用内置默认。
         返回回复文案文本；失败返回空串。
         """
         # 未解决不生成回复
@@ -208,6 +212,11 @@ class LLMClassifier:
             return ""
 
         from .reply_templates import build_reply_cases_text, REPLY_SYSTEM_PROMPT
+
+        if not cases_text:
+            cases_text = build_reply_cases_text()
+        if not system_prompt:
+            system_prompt = REPLY_SYSTEM_PROMPT
 
         # 根据类别定制指令
         if category == "已解决":
@@ -220,13 +229,12 @@ class LLMClassifier:
             instruction = (
                 "这条差评反映的问题暂时无法确认是否已解决。"
                 "请据此撰写回复：先致歉/安抚，再表示已收到反馈、会尽快排查，"
-                "必要时引导玩家通过客服邮箱 lostcastle2@hunterstudio.cn 反馈详情。"
+                "并引导玩家通过官方渠道反馈详情。"
             )
 
-        cases_text = build_reply_cases_text()
         user_content = (
             f"{instruction}\n\n"
-            f"===== 官方历史回复案例（请严格参照其语气和措辞风格）=====\n{cases_text}\n\n"
+            f"===== 历史回复案例（请严格参照其语气和措辞风格）=====\n{cases_text}\n\n"
             f"===== 待回复的差评 =====\n{review_text}\n\n"
             f"===== 归类判定理由（供参考）=====\n{reason or '（无）'}\n\n"
             "请直接输出回复文案正文，不要任何解释或标记。"
@@ -240,7 +248,7 @@ class LLMClassifier:
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": REPLY_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
             "temperature": 0.3,

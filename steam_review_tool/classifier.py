@@ -224,11 +224,16 @@ def summarize(results: list[ClassifiedReview]) -> dict[str, int]:
 def generate_replies(
     results: list[ClassifiedReview],
     llm: Optional[LLMClassifier],
+    cases_text: str = "",
+    system_prompt: str = "",
 ) -> int:
     """为归类结果生成推荐回复文案。
 
     只对「已解决」和「待确认」的差评生成；「未解决」（设计/数值等主观问题）
     不生成（保持 reply_suggestion 为空）。
+
+    cases_text:    自定义回复案例库文本；为空则用内置默认案例库。
+    system_prompt: 自定义系统提示词；为空则用内置默认。
 
     逐条调用大模型，生成结果写回每个 ClassifiedReview.reply_suggestion。
     返回成功生成的条数。
@@ -245,6 +250,8 @@ def generate_replies(
                 r.review.review_text,
                 r.category,
                 r.reason,
+                cases_text=cases_text,
+                system_prompt=system_prompt,
             )
             if reply:
                 r.reply_suggestion = reply

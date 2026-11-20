@@ -13,7 +13,13 @@ import threading
 import traceback
 import webbrowser
 
-from steam_review_tool.classifier import NewsItem, ReviewItem, classify_all, summarize
+from steam_review_tool.classifier import (
+    NewsItem,
+    ReviewItem,
+    classify_all,
+    summarize,
+    generate_replies,
+)
 from steam_review_tool.config import (
     get_api_key,
     get_deepseek_key,
@@ -23,6 +29,11 @@ from steam_review_tool.config import (
 )
 from steam_review_tool.llm_client import LLMClassifier
 from steam_review_tool.reporter import write_report
+from steam_review_tool.reply_cases_loader import (
+    ReplyCaseSource,
+    cases_to_text,
+    load_reply_cases,
+)
 from steam_review_tool.steam_client import SteamClient
 
 
@@ -114,14 +125,6 @@ def _fetch_task(
             msg_q.put(("log", "      （在界面「大模型(可选)」区勾选并填写 API Key 即可启用）"))
         results = classify_all(reviews, news, llm=llm)
 
-        # 生成推荐回复文案（已解决/待确认生成，未解决跳过）
-        reply_count = 0
-        if llm is not None and llm.available:
-            from steam_review_tool.classifier import generate_replies
-            msg_q.put(("log", "      正在生成推荐回复文案（参照官方回复案例）..."))
-            reply_count = generate_replies(results, llm)
-            msg_q.put(("log", f"      已生成 {reply_count} 条推荐回复（未解决不生成）"))
-
         path = write_report(results, appid, title, outdir, "html", range_label=range_label)
 
         counts = summarize(results)
@@ -130,8 +133,55 @@ def _fetch_task(
             "path": os.path.abspath(path),
             "counts": counts,
             "total": len(results),
-            "results": results,  # 供导出 Excel 使用
+            "results": results,  # 供导出 Excel / 生成回复使用
             "range_label": range_label,
+            "appid": appid,
+            "llm_config": llm_config,
+        }))
+    except Exception as e:  # noqa: BLE001
+        msg_q.put(("error", f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"))
+
+
+# ---------- 生成推荐回复任务（后台线程） ----------
+
+def _generate_reply_task(
+    results: list,
+    llm_config: dict,
+    case_source: ReplyCaseSource,
+    msg_q: queue.Queue,
+) -> None:
+    """后台生成推荐回复文案。
+
+    用 case_source（默认库或用户导入的案例）作为 few-shot 参考。
+    结果写回 results 里每个 ClassifiedReview.reply_suggestion。
+    """
+    try:
+        llm = None
+        if llm_config.get("enabled") and llm_config.get("api_key"):
+            llm = LLMClassifier(
+                api_key=llm_config["api_key"],
+                base_url=llm_config.get("base_url") or "https://api.deepseek.com",
+                model=llm_config.get("model") or "deepseek-chat",
+            )
+        if llm is None or not llm.available:
+            msg_q.put(("error", "未启用大模型或缺少 API Key，无法生成推荐回复。"))
+            return
+
+        # 组装案例文本
+        cases_text = ""
+        if case_source is not None and not case_source.is_empty:
+            if case_source.is_structured:
+                cases_text = cases_to_text(case_source.cases)
+            else:
+                cases_text = case_source.raw_text
+            msg_q.put(("log", f"      使用自定义回复案例库：{case_source.source_name}"))
+        else:
+            msg_q.put(("log", "      使用内置默认回复案例库"))
+
+        reply_count = generate_replies(results, llm, cases_text=cases_text)
+        msg_q.put(("done_reply", {
+            "count": reply_count,
+            "results": results,
         }))
     except Exception as e:  # noqa: BLE001
         msg_q.put(("error", f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"))
@@ -465,6 +515,8 @@ def build_app() -> "tk.Tk":
                             "title": payload["title"],
                             "range_label": payload.get("range_label", ""),
                             "results": payload["results"],
+                            "appid": payload.get("appid"),
+                            "llm_config": payload.get("llm_config", {}),
                         })
                         c = payload["counts"]
                         _log("")
@@ -474,6 +526,8 @@ def build_app() -> "tk.Tk":
                         _log(f"  报告文件：{payload['path']}")
                         _log("  点击「打开报告」在浏览器查看，或「导出 Excel」保存为表格。")
                         status_var.set("完成！可点击「打开报告」或「导出 Excel」。")
+                        # 抓取+分析完成后，弹出对话框询问是否生成推荐回复
+                        _ask_generate_reply(payload)
                         return
                     elif kind == "error":
                         progress.stop()
@@ -504,6 +558,266 @@ def build_app() -> "tk.Tk":
         except Exception as e:  # noqa: BLE001
             status_var.set(f"⚠ 导出失败：{e}")
             _log(f"\n[出错] 导出 Excel 失败：{e}")
+
+    # ---------- 生成推荐回复 & 编辑 ----------
+
+    def _refresh_report() -> None:
+        """根据最新的 results 重新生成 HTML 报告并更新缓存。"""
+        if not result_data:
+            return
+        d = result_data[-1]
+        try:
+            path = write_report(
+                d["results"], d["appid"], d["title"], "reports", "html",
+                range_label=d["range_label"],
+            )
+            result_path.clear()
+            result_path.append(os.path.abspath(path))
+            _log(f"\n✓ 报告已更新：{path}")
+            return path
+        except Exception as e:  # noqa: BLE001
+            _log(f"\n[出错] 刷新报告失败：{e}")
+            return None
+
+    def _ask_generate_reply(payload: dict) -> None:
+        """抓取+分析完成后，弹出对话框询问是否生成推荐回复。"""
+        import tkinter as tk
+        from tkinter import filedialog, messagebox
+
+        results = payload["results"]
+        # 判断是否有可生成回复的条目（非「未解决」）
+        genable = [r for r in results if r.category != "未解决"]
+        if not genable:
+            _log("  （无「已解决/待确认」的差评，跳过生成推荐回复）")
+            return
+
+        # 记录是否已启用大模型
+        llm_config = payload.get("llm_config", {})
+        has_llm = bool(llm_config.get("enabled") and llm_config.get("api_key"))
+
+        dlg = tk.Toplevel(root)
+        dlg.title("生成推荐回复")
+        dlg.geometry("520x300")
+        dlg.resizable(False, False)
+        dlg.configure(bg=card)
+        dlg.transient(root)
+        dlg.grab_set()
+
+        tk.Label(
+            dlg,
+            text=f"抓取与分析已完成，共 {len(genable)} 条差评可生成推荐回复文案。",
+            bg=card, fg=fg, font=label_font, justify="left", wraplength=480,
+        ).pack(anchor="w", padx=20, pady=(20, 4))
+
+        if not has_llm:
+            tk.Label(
+                dlg,
+                text="⚠ 当前未启用大模型，将无法生成回复。\n请先勾选界面「大模型(可选)」并填写 API Key。",
+                bg=card, fg="#c0392b", font=label_font, justify="left", wraplength=480,
+            ).pack(anchor="w", padx=20, pady=(4, 0))
+
+        tk.Label(
+            dlg,
+            text="回复案例库：",
+            bg=card, fg=fg, font=label_font,
+        ).pack(anchor="w", padx=20, pady=(16, 4))
+
+        case_var = tk.StringVar(value="默认")
+        opt_frame = tk.Frame(dlg, bg=card)
+        opt_frame.pack(anchor="w", padx=20)
+        tk.Radiobutton(
+            opt_frame, text="使用内置默认案例库", variable=case_var, value="默认",
+            bg=card, fg=fg, font=label_font, activebackground=card, anchor="w",
+        ).pack(anchor="w")
+        tk.Radiobutton(
+            opt_frame, text="导入自定义回复案例文件", variable=case_var, value="导入",
+            bg=card, fg=fg, font=label_font, activebackground=card, anchor="w",
+        ).pack(anchor="w")
+
+        imported_file: list[str] = []
+
+        def _pick_file():
+            p = filedialog.askopenfilename(
+                title="选择回复案例文件",
+                filetypes=[
+                    ("所有支持格式", "*.xlsx *.xls *.csv *.md *.txt *.docx"),
+                    ("Excel", "*.xlsx *.xls"),
+                    ("CSV", "*.csv"),
+                    ("Markdown", "*.md"),
+                    ("文本", "*.txt"),
+                    ("Word", "*.docx"),
+                    ("所有文件", "*.*"),
+                ],
+            )
+            if p:
+                imported_file.clear()
+                imported_file.append(p)
+                import_btn.configure(text=os.path.basename(p))
+
+        import_btn = tk.Button(
+            opt_frame, text="选择文件…", bg="#e8f0ea", fg=fg, font=("Microsoft YaHei", 9),
+            relief="flat", cursor="hand2", command=_pick_file,
+        )
+        import_btn.pack(anchor="w", padx=(0, 0), pady=(4, 0))
+
+        # 按钮
+        btn_frame = tk.Frame(dlg, bg=card)
+        btn_frame.pack(side="bottom", fill="x", padx=20, pady=16)
+
+        def _do_generate():
+            # 确定案例来源
+            case_source: ReplyCaseSource | None = None
+            if case_var.get() == "导入":
+                if not imported_file:
+                    messagebox.showwarning("提示", "请先选择一个回复案例文件。", parent=dlg)
+                    return
+                case_source = load_reply_cases(imported_file[0])
+                if case_source.is_empty:
+                    messagebox.showerror(
+                        "解析失败",
+                        "无法从该文件解析出回复案例（可能是空文件或格式不支持）。\n请改用 xlsx/csv/md/txt/docx 格式。",
+                        parent=dlg,
+                    )
+                    return
+            dlg.destroy()
+
+            status_var.set("正在生成推荐回复，请稍候...")
+            progress.start(10)
+            _log("\n正在生成推荐回复文案...")
+
+            msg_q2: queue.Queue = queue.Queue()
+            t2 = threading.Thread(
+                target=_generate_reply_task,
+                args=(results, payload.get("llm_config", {}), case_source, msg_q2),
+                daemon=True,
+            )
+            t2.start()
+
+            def _poll_reply():
+                try:
+                    while True:
+                        kind2, pl2 = msg_q2.get_nowait()
+                        if kind2 == "log":
+                            _log(pl2)
+                        elif kind2 == "done_reply":
+                            progress.stop()
+                            _log(f"✓ 已生成 {pl2['count']} 条推荐回复")
+                            status_var.set("推荐回复已生成，可打开报告查看或导出 Excel。")
+                            _refresh_report()
+                            _edit_replies_window()
+                            return
+                        elif kind2 == "error":
+                            progress.stop()
+                            status_var.set("生成回复出错，详情见日志。")
+                            _log("\n[出错] 生成推荐回复失败：\n" + pl2)
+                            return
+                except queue.Empty:
+                    pass
+                root.after(200, _poll_reply)
+
+            root.after(200, _poll_reply)
+
+        def _skip():
+            dlg.destroy()
+            status_var.set("已跳过生成推荐回复。")
+
+        tk.Button(
+            btn_frame, text="暂不生成", bg="#ffffff", fg=fg, font=label_font,
+            padx=16, pady=6, relief="flat", cursor="hand2", command=_skip,
+        ).pack(side="right", padx=6)
+        tk.Button(
+            btn_frame, text="生成推荐回复", bg=accent, fg="white", font=btn_font,
+            padx=20, pady=6, relief="flat", cursor="hand2", command=_do_generate,
+        ).pack(side="right")
+
+    def _edit_replies_window() -> None:
+        """弹出可编辑的回复窗口，让用户逐条修改推荐回复文案。"""
+        import tkinter as tk
+
+        if not result_data:
+            return
+        d = result_data[-1]
+        results = d["results"]
+        # 只展示有回复文案的条目（未解决无回复，不展示）
+        edit_items = [r for r in results if r.reply_suggestion]
+        if not edit_items:
+            _log("  （没有已生成的回复文案，无需编辑）")
+            return
+
+        win = tk.Toplevel(root)
+        win.title("编辑推荐回复文案")
+        win.geometry("760x640")
+        win.configure(bg=bg)
+        win.transient(root)
+
+        tk.Label(
+            win, text="可直接修改每条回复文案，点击「保存并更新报告」后生效。",
+            bg=bg, fg=sub, font=label_font,
+        ).pack(anchor="w", padx=16, pady=(12, 4))
+
+        # 可滚动容器
+        canvas = tk.Canvas(win, bg=bg, highlightthickness=0)
+        scrollbar = tk.Scrollbar(win, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True, padx=(16, 0), pady=(0, 8))
+
+        inner = tk.Frame(canvas, bg=bg)
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        # 保存每个条目对应的编辑文本框
+        entry_vars: list[tk.Text] = []
+
+        for r in edit_items:
+            card_f = tk.Frame(inner, bg=card)
+            card_f.pack(fill="x", padx=(0, 12), pady=6)
+
+            head = tk.Frame(card_f, bg=card)
+            head.pack(fill="x", padx=12, pady=(10, 2))
+            # 差评摘要 + 类别标签
+            summary = r.review.review_text.strip().replace("\n", " ")[:60]
+            tag_color = {"已解决": "#1e9b50", "未解决": "#c0392b", "待确认": "#e67e22"}.get(r.category, "#666")
+            tk.Label(
+                head, text=f"[{r.category}] {summary}", bg=card, fg=fg,
+                font=("Microsoft YaHei", 9, "bold"), anchor="w",
+            ).pack(side="left")
+            tk.Label(
+                head, text=r.category, bg=tag_color, fg="white",
+                font=("Microsoft YaHei", 8), padx=6, pady=1,
+            ).pack(side="right")
+
+            txt = tk.Text(card_f, font=("Microsoft YaHei", 10), wrap="word",
+                          height=4, padx=10, pady=8, relief="solid", borderwidth=1)
+            txt.insert("1.0", r.reply_suggestion)
+            txt.pack(fill="x", padx=12, pady=(0, 10))
+            entry_vars.append((r, txt))
+
+        def _inner_configure(e=None):
+            inner.update_idletasks()
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        inner.bind("<Configure>", _inner_configure)
+
+        # 底部按钮
+        bottom = tk.Frame(win, bg=bg)
+        bottom.pack(fill="x", padx=16, pady=12)
+
+        def _save():
+            for r, txt in entry_vars:
+                r.reply_suggestion = txt.get("1.0", "end").strip()
+            _refresh_report()
+            _log("✓ 回复文案已更新并保存到报告。")
+            status_var.set("回复文案已更新。")
+            win.destroy()
+
+        tk.Button(
+            bottom, text="保存并更新报告", bg=accent, fg="white", font=btn_font,
+            padx=20, pady=6, relief="flat", cursor="hand2", command=_save,
+        ).pack(side="right")
+        tk.Button(
+            bottom, text="取消", bg="#ffffff", fg=fg, font=label_font,
+            padx=16, pady=6, relief="flat", cursor="hand2", command=win.destroy,
+        ).pack(side="right", padx=6)
 
     start_btn.configure(command=_on_start)
     open_btn.configure(command=_on_open)
