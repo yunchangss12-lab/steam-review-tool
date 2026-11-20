@@ -1,0 +1,6 @@
+{
+  "steam_web_api_key": "",
+  "deepseek_api_key": "",
+  "llm_model": "deepseek-chat",
+  "llm_base_url": "https://api.deepseek.com"
+}

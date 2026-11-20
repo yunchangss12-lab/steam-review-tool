@@ -5,6 +5,9 @@ config.local.json
 secrets.json
 api_key.txt
 
+# 例外：安装器内的 config 模板（空的，不含真实密钥）需要入库
+!installer/config.local.json
+
 # ===== 抓取到的数据（含用户/客户数据，严禁入库）=====
 data/
 output/
