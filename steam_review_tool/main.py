@@ -51,8 +51,12 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"[1/4] 获取游戏信息（AppID {args.appid}）...")
     details = client.get_app_details(args.appid)
-    title = details.get("name", f"AppID {args.appid}") if details else f"AppID {args.appid}"
-    print(f"      游戏：{title}")
+    if details:
+        title = details.get("name", f"AppID {args.appid}")
+        print(f"      游戏：{title}")
+    else:
+        title = f"AppID {args.appid}"
+        print("      游戏信息获取失败（网络超时/不可达），将以 AppID 作为标题继续")
 
     rng_desc = f"{args.start or '不限'} ~ {args.end or '不限'}"
     print(f"[2/4] 抓取差评（时间范围：{rng_desc}）...")

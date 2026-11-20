@@ -35,8 +35,12 @@ def _fetch_task(
 
         msg_q.put(("log", f"[1/4] 获取游戏信息（AppID {appid}）..."))
         details = client.get_app_details(appid)
-        title = details.get("name", f"AppID {appid}") if details else f"AppID {appid}"
-        msg_q.put(("log", f"      游戏：{title}"))
+        if details:
+            title = details.get("name", f"AppID {appid}")
+            msg_q.put(("log", f"      游戏：{title}"))
+        else:
+            title = f"AppID {appid}"
+            msg_q.put(("log", f"      游戏信息获取失败（网络超时/不可达），将以 AppID 作为标题继续"))
 
         # 时间范围描述（用于日志）
         import datetime as _dt

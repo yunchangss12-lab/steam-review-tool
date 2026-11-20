@@ -81,8 +81,12 @@ def run() -> int:
 
     _print(f"\n[1/4] 获取游戏信息（AppID {appid}）...")
     details = client.get_app_details(appid)
-    title = details.get("name", f"AppID {appid}") if details else f"AppID {appid}"
-    _print(f"      游戏：{title}")
+    if details:
+        title = details.get("name", f"AppID {appid}")
+        _print(f"      游戏：{title}")
+    else:
+        title = f"AppID {appid}"
+        _print("      游戏信息获取失败（网络超时/不可达），将以 AppID 作为标题继续")
 
     _print(f"[2/4] 抓取历史差评（最多 {pages * 100} 条）...")
     raw_reviews = client.get_reviews(

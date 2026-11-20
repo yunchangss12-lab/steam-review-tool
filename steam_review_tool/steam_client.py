@@ -65,6 +65,8 @@ class SteamClient:
         同时指数退避重试，缓解国内访问 Steam API 的间歇性超时。
         """
         last_exc: Exception | None = None
+        # 允许调用方显式传入基础超时，否则用实例默认值
+        base_timeout = kwargs.pop("timeout", self.timeout)
         # 通道顺序：先代理，后直连
         for use_proxy in (True, False):
             session = requests.Session()
@@ -74,7 +76,7 @@ class SteamClient:
                     resp = session.get(
                         url,
                         headers=HEADERS,
-                        timeout=self.timeout * (attempt + 1),
+                        timeout=base_timeout * (attempt + 1),
                         **kwargs,
                     )
                     resp.raise_for_status()
@@ -140,8 +142,17 @@ class SteamClient:
                 params["end_date"] = int(date_end) if date_end is not None else int(time.time())
 
             self._throttle()
-            resp = self._get(url, params=params)
-            data = resp.json()
+            try:
+                resp = self._get(url, params=params)
+                data = resp.json()
+            except (
+                requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.RequestException,
+                ValueError,
+            ):
+                # 翻页过程中偶发超时：保留已抓到的部分，终止翻页，避免前功尽弃
+                break
             page_reviews = data.get("reviews", [])
             reviews.extend(page_reviews)
             new_cursor = data.get("cursor", "")
@@ -152,16 +163,36 @@ class SteamClient:
         return reviews
 
     def get_app_details(self, appid: int) -> Optional[dict]:
+        """拉取游戏基本信息（商店 appdetails 接口）。
+
+        这个接口偶尔在国内网络下超时/不通，但它不是核心数据——
+        失败时返回 None（由上层降级为「AppID xxxx」作标题），
+        绝不让它拖垮整个抓取流程。
+        """
         params = {"appids": appid, "l": "schinese", "cc": "cn"}
         self._throttle()
-        resp = self._get(APPDETAIL_API, params=params)
-        data = resp.json()
-        if data and str(appid) in data and data[str(appid)].get("success"):
-            return data[str(appid)]["data"]
+        try:
+            # 商店接口用更短的超时，避免长时间卡死等待
+            resp = self._get(APPDETAIL_API, params=params, timeout=self.timeout)
+            data = resp.json()
+            if data and str(appid) in data and data[str(appid)].get("success"):
+                return data[str(appid)]["data"]
+        except (
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.RequestException,
+            ValueError,
+        ):
+            # 游戏信息获取失败不致命：标题降级为 AppID，差评/更新记录照常抓
+            pass
         return None
 
     def get_news(self, appid: int, count: int = 50, maxlength: int = 2000) -> list[dict]:
-        """拉取更新记录 / Patch Notes。需要 API Key。"""
+        """拉取更新记录 / Patch Notes。需要 API Key。
+
+        失败时返回空列表（归类仍可基于差评文本自身的信号词进行），
+        不让更新记录接口的抖动中断整个流程。
+        """
         if not self.api_key:
             return []
         params = {
@@ -171,11 +202,19 @@ class SteamClient:
             "format": "json",
         }
         self._throttle()
-        resp = self._get(NEWS_API, params=params)
-        data = resp.json()
-        items = (
-            data.get("appnews", {}).get("newsitems", [])
-            if data.get("appnews")
-            else []
-        )
-        return items
+        try:
+            resp = self._get(NEWS_API, params=params)
+            data = resp.json()
+            items = (
+                data.get("appnews", {}).get("newsitems", [])
+                if data.get("appnews")
+                else []
+            )
+            return items
+        except (
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.RequestException,
+            ValueError,
+        ):
+            return []
