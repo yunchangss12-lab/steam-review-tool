@@ -142,7 +142,7 @@ def build_app() -> "tk.Tk":
 
     tk.Label(
         form,
-        text="每页 100 条差评；页数越多覆盖越全，耗时也越长",
+        text="每页 100 条；可抓全量历史差评（页数越多越全，耗时越长）",
         bg=card, fg=sub, font=("Microsoft YaHei", 8),
     ).grid(row=3, column=1, sticky="w", padx=(0, 16), pady=(0, 8))
 

@@ -18,11 +18,19 @@ from typing import Optional
 
 import requests
 
-REVIEWS_API = "https://api.steampowered.com/IUserReviewsService/GetAppReviews/v1/"
+# 社区内部评测接口：能拉到「全量历史评测」，不受官方接口 30 天窗口限制。
+# 这是商店/社区页面实际用来加载评测列表的接口（Revadike/InternalSteamWebAPI 文档）。
+REVIEWS_API = "https://store.steampowered.com/ajaxappreviews/{appid}"
+# 官方 Service 接口：作为兜底，但它只返回最近 30 天（day_range_used=30），
+# 无法取到历史全量，故仅作降级方案。
+REVIEWS_API_FALLBACK = "https://api.steampowered.com/IUserReviewsService/GetAppReviews/v1/"
 APPDETAIL_API = "https://store.steampowered.com/api/appdetails"
 NEWS_API = "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/"
 
-HEADERS = {"User-Agent": "SteamReviewTool/1.0 (developer support tool)"}
+HEADERS = {
+    "User-Agent": "SteamReviewTool/1.0 (developer support tool)",
+    "Accept": "application/json, text/plain, */*",
+}
 
 
 class SteamClient:
@@ -87,48 +95,43 @@ class SteamClient:
         language: str = "all",
         review_type: str = "negative",
         num_per_page: int = 100,
-        max_pages: int = 20,
+        max_pages: int = 100,
     ) -> list[dict]:
-        """分页拉取评测（官方 IUserReviewsService 接口）。
+        """分页拉取评测（社区内部 ajaxappreviews 接口，全量历史）。
 
         review_type: "negative"（差评）/ "positive"（好评）/ "all"
         返回按时间倒序的评测列表（最新在前）。
 
-        说明：
-        - filter 用 recent（按创建时间倒序），这样配合 cursor 分页能取到
-          「最新一批差评」，而不是按好评度排序。
-        - languages 用 [language]；"all" 表示所有语言。
-        - Service 接口需把参数整体放进 input_json。
+        为什么不用官方 GetAppReviews：
+          - 官方接口 filter=recent 会硬性 day_range_used=30，只返回最近 30 天，
+            历史差评（游戏可能有几千条）根本拉不到。
+          - 社区内部接口 /ajaxappreviews/:appid 是商店/社区页面实际使用的接口，
+            能通过 cursor 翻页拿到「全量历史评测」，无 30 天窗口限制。
         """
         reviews: list[dict] = []
         cursor = "*"
-        # review_type 枚举（官方 EUserReviewsReviewType）：
-        #   0 = all, 1 = positive(好评), 2 = negative(差评)
-        rt_map = {"negative": 2, "positive": 1, "all": 0}
-        review_type_id = rt_map.get(review_type, 2)
+        url = REVIEWS_API.format(appid=appid)
 
         for _ in range(max_pages):
-            payload = {
+            params = {
                 "json": 1,
-                "appid": appid,
-                "filter": "recent",
-                "languages": ["all"] if language == "all" else [language],
-                "review_type": review_type_id,
+                "review_type": review_type,  # negative / positive / all（字符串）
                 "purchase_type": "all",
+                "language": language,
                 "num_per_page": num_per_page,
                 "cursor": cursor,
+                "filter": "recent",  # 按创建时间倒序，可完整遍历到空列表
             }
             self._throttle()
-            resp = self._get(
-                REVIEWS_API,
-                params={"input_json": json.dumps(payload)},
-            )
+            resp = self._get(url, params=params)
             data = resp.json()
-            resp_body = data.get("response", {})
-            reviews.extend(resp_body.get("reviews", []))
-            cursor = resp_body.get("cursor", "")
-            if not cursor or cursor == "*" or len(resp_body.get("reviews", [])) < num_per_page:
+            page_reviews = data.get("reviews", [])
+            reviews.extend(page_reviews)
+            new_cursor = data.get("cursor", "")
+            # 终止条件：无更多数据 / cursor 不再变化 / 返回不足一页
+            if not page_reviews or new_cursor == cursor or not new_cursor:
                 break
+            cursor = new_cursor
         return reviews
 
     def get_app_details(self, appid: int) -> Optional[dict]:
