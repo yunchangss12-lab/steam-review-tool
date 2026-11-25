@@ -122,38 +122,48 @@ def classify_all(
     news_items: list[NewsItem],
     llm: Optional[LLMClassifier] = None,
     batch_size: int = 10,
-    check_localization: bool = False,
+    do_classify: bool = True,
+    do_localization: bool = False,
 ) -> list[ClassifiedReview]:
-    """对全部差评做归类（可选：额外的本地化质量判断）。
+    """对全部差评做归类，并（可选）独立做本地化质量判断。
 
     llm: 已初始化的大模型分类器。若为 None 或不可用，则走保守本地降级。
     news_items 全部参与匹配（不限时间段——补丁修复不区分差评前后）。
 
-    check_localization: 是否额外启用「本地化质量反馈」判断（可选）。
-        —— 注意：本地化判断与「差评↔补丁修复」归类是完全分离的两条流程：
-          1) 先做四分类归类（差评问题 ↔ 补丁修复，需要补丁正文）
-          2) 若勾选本地化判断，再独立跑一遍本地化判断（只看差评文本，
-             不需要补丁，节省 token），把判定为本地化问题的差评覆盖为
-             「本地化质量反馈」分类。
+    do_classify:    是否执行「差评问题 ↔ 补丁修复」四分类归类。
+    do_localization: 是否执行「本地化质量」判断。
+
+    —— 两个功能完全独立，可自由组合（分别对应前端两个勾选框）：
+      · 只 do_classify：纯四分类（已解决/未解决/情绪化评论/待确认）
+      · 只 do_localization：仅判断是否本地化问题，是则标「本地化质量反馈」，
+        否则标「待确认」（不比对补丁，不产生已解决/未解决结论）
+      · 两者都勾：先四分类，再用本地化判断覆盖「本地化质量反馈」
+      · 都不勾：一律「待确认」（兜底）
     """
     # 排序补丁（升序），便于后续按差评时间过滤
     news_sorted = sorted(news_items, key=lambda n: n.date)
     # 预筛：过滤与修复无关的营销贴（不按时间过滤）
     news_candidates = _filter_patch_news(news_sorted)
 
-    # 若大模型可用，走语义精判
-    if llm is not None and llm.available:
+    # 1) 语义归类（差评 ↔ 补丁修复）
+    if do_classify and llm is not None and llm.available:
         try:
             results = _classify_with_llm(reviews, news_candidates, llm, batch_size)
         except Exception as e:
-            # 大模型调用失败 → 降级到保守本地规则，并附上失败原因
             results = _classify_fallback(reviews, news_candidates, reason=str(e))
-    else:
+    elif do_classify:
+        # 要归类但无大模型 → 降级
         results = _classify_fallback(reviews, news_candidates)
+    else:
+        # 不归类：初始一律「待确认」，后续可选由本地化判断覆盖
+        results = [ClassifiedReview(r, "待确认", [], [], "") for r in reviews]
 
-    # 独立的本地化质量判断（可选，与归类分离，不重跑归类）
-    if check_localization and llm is not None and llm.available:
+    # 2) 独立的本地化质量判断（可选，与归类分离）
+    if do_localization and llm is not None and llm.available:
         results = _apply_localization_pass(results, llm, batch_size)
+    elif do_localization:
+        # 想判断本地化但无大模型：无法判断，保持现状（归类结果或待确认）
+        pass
 
     return results
 

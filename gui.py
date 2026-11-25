@@ -48,15 +48,17 @@ def _fetch_task(
     llm_config: dict,
     range_label: str,
     lang_label: str,
-    check_localization: bool,
+    do_classify: bool,
+    do_localization: bool,
     msg_q: queue.Queue,
 ) -> None:
-    """在后台线程里执行完整抓取+比对，进度经 msg_q 回传主线程。
+    """在后台线程里执行完整抓取+分析，进度经 msg_q 回传主线程。
 
     llm_config: {"enabled": bool, "api_key": str, "base_url": str, "model": str}
     range_label: 时间段文案（用于日志与文件名）。
     lang_label: 语种文案（用于文件名）。
-    check_localization: 是否启用「本地化质量反馈」判断。
+    do_classify:    是否启用「语义归类」（差评 ↔ 补丁修复）。
+    do_localization: 是否启用「本地化质量判断」（翻译问题，独立流程）。
     """
     try:
         client = SteamClient(api_key=get_api_key())
@@ -115,7 +117,7 @@ def _fetch_task(
         ]
         msg_q.put(("log", f"      共获取 {len(news)} 条更新记录"))
 
-        msg_q.put(("log", "[4/4] 语义比对归类（大模型分析差评问题与补丁修复的对应关系）..."))
+        msg_q.put(("log", "[4/4] 大模型分析..."))
         llm = None
         if llm_config.get("enabled") and llm_config.get("api_key"):
             llm = LLMClassifier(
@@ -123,19 +125,29 @@ def _fetch_task(
                 base_url=llm_config.get("base_url") or "https://api.deepseek.com",
                 model=llm_config.get("model") or "deepseek-chat",
             )
-            msg_q.put(("log", f"      已启用大模型语义判断（{llm.model}）"))
+            msg_q.put(("log", f"      大模型就绪（{llm.model}）"))
         else:
-            msg_q.put(("log", "      ⚠ 未启用大模型，归类将全部标为「待确认」"))
-            msg_q.put(("log", "      （在界面「大模型(可选)」区勾选并填写 API Key 即可启用）"))
-        if check_localization:
-            if llm is None:
-                # 本地化判断依赖大模型，但当前未启用大模型 → 明确提示
-                msg_q.put(("log", "      ⚠ 本地化质量判断依赖大模型，但未启用大模型或缺少 API Key。"))
-                msg_q.put(("log", "      （请勾选「启用大模型语义判断」并填写 API Key，否则无法识别本地化问题）"))
+            msg_q.put(("log", "      ⚠ 未配置大模型（API Key 为空），两个分析功能都无法执行。"))
+            msg_q.put(("log", "      （请在下方填写 API Key，并勾选需要的分析功能）"))
+
+        # 分别提示两个独立功能的执行情况
+        if do_classify:
+            if llm is not None:
+                msg_q.put(("log", "      ✓ 语义归类：分析差评问题 ↔ 补丁修复的对应关系"))
             else:
-                # 分离说明：归类与本地化判断是两条独立流程，各调用一次大模型
-                msg_q.put(("log", "      已启用「本地化质量反馈」判断（独立流程，仅分析差评文本，不重复比对补丁）"))
-        results = classify_all(reviews, news, llm=llm, check_localization=check_localization)
+                msg_q.put(("log", "      ✗ 语义归类：未启用（无大模型），差评将标为「待确认」"))
+        if do_localization:
+            if llm is not None:
+                msg_q.put(("log", "      ✓ 本地化质量判断：独立分析差评是否涉及翻译/本地化问题"))
+            else:
+                msg_q.put(("log", "      ✗ 本地化质量判断：未启用（无大模型），无法识别本地化问题"))
+        if not do_classify and not do_localization:
+            msg_q.put(("log", "      ⚠ 未选择任何分析功能，差评将全部标为「待确认」。"))
+
+        results = classify_all(
+            reviews, news, llm=llm,
+            do_classify=do_classify, do_localization=do_localization,
+        )
 
         path = write_report(
             results, appid, title, outdir, "html",
@@ -414,20 +426,23 @@ def build_app() -> "tk.Tk":
     range_combo.bind("<<ComboboxSelected>>", _on_range_change)
 
     # ---------- 大模型（可选）配置区 ----------
-    # 启用开关 + base_url / api_key / model 输入框，全部自填；
-    # 不勾选或留空则走本地保守归类（全「待确认」）。
+    # 大模型配置（API Key / Base URL / 模型名）是「基础设施」，两个分析功能共用。
+    # 下面两个勾选框是「独立功能开关」，可自由组合：
+    #   ① 语义归类（差评↔补丁修复）  ② 本地化质量判断（翻译问题）
     llm_card = tk.Frame(root, bg=card)
     llm_card.pack(fill="x", padx=16, pady=(0, 8))
 
     llm_header = tk.Frame(llm_card, bg=card)
     llm_header.pack(fill="x", padx=16, pady=(10, 4))
-    llm_enabled_var = tk.BooleanVar(value=bool(get_deepseek_key()))
-    llm_check = tk.Checkbutton(
-        llm_header, text="启用大模型语义判断（分析差评问题 ↔ 补丁修复的对应关系）",
-        variable=llm_enabled_var, bg=card, fg=fg, font=label_font,
+
+    # 功能开关①：语义归类（差评 ↔ 补丁修复）
+    do_classify_var = tk.BooleanVar(value=bool(get_deepseek_key()))
+    classify_check = tk.Checkbutton(
+        llm_header, text="启用语义归类（分析差评问题 ↔ 补丁修复的对应关系）",
+        variable=do_classify_var, bg=card, fg=fg, font=label_font,
         activebackground=card, anchor="w", cursor="hand2",
     )
-    llm_check.pack(side="left")
+    classify_check.pack(side="left")
 
     llm_fields = tk.Frame(llm_card, bg=card)
     llm_fields.pack(fill="x", padx=16, pady=(0, 10))
@@ -457,31 +472,20 @@ def build_app() -> "tk.Tk":
 
     tk.Label(
         llm_fields,
-        text="支持 OpenAI 兼容接口（DeepSeek/Kimi/通义/Ollama 等）；留空 API Key 即不启用。填写会自动保存。",
+        text="支持 OpenAI 兼容接口（DeepSeek/Kimi/通义/Ollama 等）；留空 API Key 则两个分析功能都不可用。填写会自动保存。",
         bg=card, fg=sub, font=("Microsoft YaHei", 8),
     ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
-    # 本地化质量判断（可选，依赖大模型）
+    # 功能开关②：本地化质量判断（独立于语义归类，可单独开启）
     loc_card = tk.Frame(root, bg=card)
     loc_card.pack(fill="x", padx=16, pady=(0, 8))
-    check_localization_var = tk.BooleanVar(value=False)
-
-    def _on_loc_toggle() -> None:
-        """勾选「本地化质量判断」时，自动联动勾选「启用大模型语义判断」。
-
-        因为本地化质量判断本质上是靠大模型识别的，和分析差评↔补丁修复
-        用的是同一个大模型基础设施；若不自动启用，llm=None 会导致归类
-        全部降级为「待确认」，呈现「调用大模型失败」的假象。
-        """
-        if check_localization_var.get():
-            if not llm_enabled_var.get():
-                llm_enabled_var.set(True)
+    do_localization_var = tk.BooleanVar(value=False)
 
     loc_check = tk.Checkbutton(
         loc_card,
-        text="启用本地化质量判断（识别差评是否与翻译/本地化质量相关，单独归入「本地化质量反馈」分类）",
-        variable=check_localization_var, bg=card, fg=fg, font=label_font,
-        activebackground=card, anchor="w", cursor="hand2", command=_on_loc_toggle,
+        text="启用本地化质量判断（独立分析差评是否与翻译/本地化质量相关，归入「本地化质量反馈」分类）",
+        variable=do_localization_var, bg=card, fg=fg, font=label_font,
+        activebackground=card, anchor="w", cursor="hand2",
     )
     loc_check.pack(fill="x", padx=16, pady=10)
 
@@ -596,12 +600,9 @@ def build_app() -> "tk.Tk":
         # 语种中文名（用于文件名）
         lang_label = _lang_display_to_label(lang_var.get())
 
-        # 本地化质量判断（可选，依赖大模型）
-        check_localization = bool(check_localization_var.get())
-        if check_localization and not llm_enabled_var.get():
-            # 兜底：本地化判断依赖大模型，若用户只勾了本地化判断却没启用大模型，
-            # 自动启用大模型（否则 llm=None 会降级为全「待确认」，表现为「调用失败」）。
-            llm_enabled_var.set(True)
+        # 两个独立功能开关：语义归类 + 本地化质量判断（可自由组合）
+        do_classify = bool(do_classify_var.get())
+        do_localization = bool(do_localization_var.get())
 
         # 解析时间范围
         if range_var.get() == "自定义日期":
@@ -626,16 +627,17 @@ def build_app() -> "tk.Tk":
         else:
             range_label = range_choice
 
-        # 收集大模型配置（可选）
-        llm_enabled = bool(llm_enabled_var.get())
+        # 收集大模型配置。只要两个功能开关中任意一个开启，就需要大模型。
+        # （语义归类和本地化判断共用同一套 API Key / Base URL / 模型）
+        llm_needed = do_classify or do_localization
         llm_config = {
-            "enabled": llm_enabled,
-            "api_key": llm_api_key_var.get().strip() if llm_enabled else "",
+            "enabled": llm_needed,
+            "api_key": llm_api_key_var.get().strip() if llm_needed else "",
             "base_url": llm_base_url_var.get().strip(),
             "model": llm_model_var.get().strip(),
         }
-        # 若启用了大模型，把配置保存到 config.local.json（下次启动自动回填）
-        if llm_enabled and llm_config["api_key"]:
+        # 若需要大模型且有 Key，把配置保存到 config.local.json（下次启动自动回填）
+        if llm_needed and llm_config["api_key"]:
             save_llm_config(
                 llm_config["api_key"],
                 base_url=llm_config["base_url"],
@@ -653,7 +655,7 @@ def build_app() -> "tk.Tk":
         msg_q: queue.Queue = queue.Queue()
         t = threading.Thread(
             target=_fetch_task,
-            args=(appid, lang, date_start, date_end, "reports", llm_config, range_label, lang_label, check_localization, msg_q),
+            args=(appid, lang, date_start, date_end, "reports", llm_config, range_label, lang_label, do_classify, do_localization, msg_q),
             daemon=True,
         )
         t.start()

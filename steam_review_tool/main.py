@@ -47,7 +47,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--end", default="", help="结束日期 YYYY-MM-DD（含，默认不限）")
     parser.add_argument("--format", default="html", choices=["html", "md"], help="报告格式")
     parser.add_argument("--outdir", default="reports", help="报告输出目录")
-    parser.add_argument("--check-localization", action="store_true", help="额外启用本地化质量反馈判断")
+    parser.add_argument("--no-classify", action="store_true", help="禁用语义归类（差评↔补丁修复），差评标为待确认")
+    parser.add_argument("--localization", action="store_true", help="额外启用本地化质量判断（独立流程，只看差评文本）")
     args = parser.parse_args(argv)
 
     date_start = _parse_date(args.start)
@@ -105,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     ]
     print(f"      共获取 {len(news)} 条更新记录")
 
-    print("[4/4] 语义比对归类（大模型分析差评问题与补丁修复的对应关系）...")
+    print("[4/4] 大模型分析...")
     llm = None
     if get_deepseek_key():
         llm = LLMClassifier(
@@ -113,13 +114,24 @@ def main(argv: list[str] | None = None) -> int:
             base_url=get_llm_base_url(),
             model=get_llm_model(),
         )
-        print(f"      已启用大模型语义判断（{get_llm_model()}）")
+        print(f"      大模型就绪（{get_llm_model()}）")
     else:
-        print("      ⚠ 未启用大模型，归类将全部标为「待确认」")
+        print("      ⚠ 未配置大模型（API Key），两个分析功能都无法执行。")
         print("      （请在 config.local.json 填入 deepseek_api_key）")
-    if args.check_localization:
-        print("      已启用「本地化质量反馈」判断")
-    results = classify_all(reviews, news, llm=llm, check_localization=args.check_localization)
+
+    do_classify = not args.no_classify
+    do_localization = args.localization
+    if do_classify:
+        print("      ✓ 语义归类：分析差评问题 ↔ 补丁修复")
+    if do_localization:
+        print("      ✓ 本地化质量判断：独立分析翻译/本地化问题")
+    if not do_classify and not do_localization:
+        print("      ⚠ 未选择任何分析功能，差评将全部标为「待确认」。")
+
+    results = classify_all(
+        reviews, news, llm=llm,
+        do_classify=do_classify, do_localization=do_localization,
+    )
 
     # 生成推荐回复文案（已解决/待确认/情绪化评论/本地化质量反馈生成，未解决跳过）
     if llm is not None and llm.available:
