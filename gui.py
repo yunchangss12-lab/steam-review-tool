@@ -129,6 +129,10 @@ def _fetch_task(
             msg_q.put(("log", "      （在界面「大模型(可选)」区勾选并填写 API Key 即可启用）"))
         if check_localization:
             msg_q.put(("log", "      已启用「本地化质量反馈」判断（识别翻译/本地化相关的差评）"))
+            if llm is None:
+                # 本地化判断依赖大模型，但当前未配置/未启用大模型 → 明确提示
+                msg_q.put(("log", "      ⚠ 本地化质量判断依赖大模型，但未启用大模型或缺少 API Key。"))
+                msg_q.put(("log", "      （请在上方勾选「启用大模型语义判断」并填写 API Key，否则无法识别本地化问题）"))
         results = classify_all(reviews, news, llm=llm, check_localization=check_localization)
 
         path = write_report(
@@ -459,11 +463,23 @@ def build_app() -> "tk.Tk":
     loc_card = tk.Frame(root, bg=card)
     loc_card.pack(fill="x", padx=16, pady=(0, 8))
     check_localization_var = tk.BooleanVar(value=False)
+
+    def _on_loc_toggle() -> None:
+        """勾选「本地化质量判断」时，自动联动勾选「启用大模型语义判断」。
+
+        因为本地化质量判断本质上是靠大模型识别的，和分析差评↔补丁修复
+        用的是同一个大模型基础设施；若不自动启用，llm=None 会导致归类
+        全部降级为「待确认」，呈现「调用大模型失败」的假象。
+        """
+        if check_localization_var.get():
+            if not llm_enabled_var.get():
+                llm_enabled_var.set(True)
+
     loc_check = tk.Checkbutton(
         loc_card,
         text="启用本地化质量判断（识别差评是否与翻译/本地化质量相关，单独归入「本地化质量反馈」分类）",
         variable=check_localization_var, bg=card, fg=fg, font=label_font,
-        activebackground=card, anchor="w", cursor="hand2",
+        activebackground=card, anchor="w", cursor="hand2", command=_on_loc_toggle,
     )
     loc_check.pack(fill="x", padx=16, pady=10)
 
@@ -578,8 +594,12 @@ def build_app() -> "tk.Tk":
         # 语种中文名（用于文件名）
         lang_label = _lang_display_to_label(lang_var.get())
 
-        # 本地化质量判断（可选）
+        # 本地化质量判断（可选，依赖大模型）
         check_localization = bool(check_localization_var.get())
+        if check_localization and not llm_enabled_var.get():
+            # 兜底：本地化判断依赖大模型，若用户只勾了本地化判断却没启用大模型，
+            # 自动启用大模型（否则 llm=None 会降级为全「待确认」，表现为「调用失败」）。
+            llm_enabled_var.set(True)
 
         # 解析时间范围
         if range_var.get() == "自定义日期":
