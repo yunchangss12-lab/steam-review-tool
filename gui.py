@@ -26,6 +26,7 @@ from steam_review_tool.config import (
     get_llm_model,
     get_llm_base_url,
     save_llm_config,
+    save_steam_api_key,
 )
 from steam_review_tool.llm_client import LLMClassifier
 from steam_review_tool.reporter import write_report
@@ -50,6 +51,7 @@ def _fetch_task(
     lang_label: str,
     do_classify: bool,
     do_localization: bool,
+    steam_api_key: str,
     msg_q: queue.Queue,
 ) -> None:
     """在后台线程里执行完整抓取+分析，进度经 msg_q 回传主线程。
@@ -59,9 +61,10 @@ def _fetch_task(
     lang_label: 语种文案（用于文件名）。
     do_classify:    是否启用「语义归类」（差评 ↔ 补丁修复）。
     do_localization: 是否启用「本地化质量判断」（翻译问题，独立流程）。
+    steam_api_key:  界面填写的 Steam Web API Key（优先于配置文件）。
     """
     try:
-        client = SteamClient(api_key=get_api_key())
+        client = SteamClient(api_key=steam_api_key or get_api_key())
 
         msg_q.put(("log", f"[1/4] 获取游戏信息（AppID {appid}）..."))
         details = client.get_app_details(appid)
@@ -437,6 +440,35 @@ def build_app() -> "tk.Tk":
 
     range_combo.bind("<<ComboboxSelected>>", _on_range_change)
 
+    # ---------- Steam Web API Key 配置区 ----------
+    steam_card = tk.Frame(root, bg=card)
+    steam_card.pack(fill="x", padx=16, pady=(0, 8))
+
+    steam_fields = tk.Frame(steam_card, bg=card)
+    steam_fields.pack(fill="x", padx=16, pady=(10, 6))
+
+    tk.Label(
+        steam_fields, text="Steam Web API Key：", bg=card, fg=fg,
+        font=("Microsoft YaHei", 9),
+    ).grid(row=0, column=0, sticky="w", pady=3)
+    steam_api_key_var = tk.StringVar(value=get_api_key())
+    tk.Entry(steam_fields, textvariable=steam_api_key_var, font=("Consolas", 9), width=46).grid(
+        row=0, column=1, sticky="w", pady=3
+    )
+
+    def _save_steam_key(_event=None):
+        save_steam_api_key(steam_api_key_var.get().strip())
+
+    steam_api_key_entry = steam_fields.grid_slaves(row=0, column=1)[0]
+    steam_api_key_entry.bind("<FocusOut>", _save_steam_key)
+    steam_api_key_entry.bind("<Return>", _save_steam_key)
+
+    tk.Label(
+        steam_fields,
+        text="用于抓取更新记录（Patch Notes）；留空则无法比对更新记录。填写会自动保存。申请：https://steamcommunity.com/dev/apikey",
+        bg=card, fg=sub, font=("Microsoft YaHei", 8),
+    ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 4))
+
     # ---------- 大模型（可选）配置区 ----------
     # 大模型配置（API Key / Base URL / 模型名）是「基础设施」，两个分析功能共用。
     # 下面两个勾选框是「独立功能开关」，可自由组合：
@@ -576,7 +608,7 @@ def build_app() -> "tk.Tk":
         lang_hint_var.set("⏳ 正在获取该游戏支持的语种...")
         status_var.set("正在获取游戏支持的语种...")
         try:
-            client = SteamClient(api_key=get_api_key())
+            client = SteamClient(api_key=steam_api_key_var.get().strip() or get_api_key())
             langs = client.get_supported_languages(appid)
         except Exception as e:  # noqa: BLE001
             langs = []
@@ -662,6 +694,10 @@ def build_app() -> "tk.Tk":
                 base_url=llm_config["base_url"],
                 model=llm_config["model"],
             )
+        # 保存 Steam Web API Key（下次启动自动回填）
+        steam_key = steam_api_key_var.get().strip()
+        if steam_key:
+            save_steam_api_key(steam_key)
 
         result_path.clear()
         result_data.clear()
@@ -674,7 +710,7 @@ def build_app() -> "tk.Tk":
         msg_q: queue.Queue = queue.Queue()
         t = threading.Thread(
             target=_fetch_task,
-            args=(appid, lang, date_start, date_end, "reports", llm_config, range_label, lang_label, do_classify, do_localization, msg_q),
+            args=(appid, lang, date_start, date_end, "reports", llm_config, range_label, lang_label, do_classify, do_localization, steam_key, msg_q),
             daemon=True,
         )
         t.start()

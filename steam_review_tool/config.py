@@ -50,6 +50,23 @@ def get_llm_base_url() -> str:
     return load_config().get("llm_base_url", "https://api.deepseek.com").strip() or "https://api.deepseek.com"
 
 
+def save_steam_api_key(api_key: str) -> bool:
+    """把 Steam Web API Key 写回 config.local.json，供下次启动复用。
+
+    返回是否写入成功。仅在配置文件已存在或可创建时写入，失败静默返回 False。
+    """
+    path = _config_path()
+    try:
+        cfg = load_config()
+        if api_key:
+            cfg["steam_web_api_key"] = api_key
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        return True
+    except OSError:
+        return False
+
+
 def save_llm_config(api_key: str, base_url: str = "", model: str = "") -> bool:
     """把大模型配置写回 config.local.json，供下次启动复用。
 
