@@ -234,6 +234,46 @@ def _resolve_date_range(
     return ds, de
 
 
+# ---------- 语言下拉框辅助 ----------
+
+def _lang_display_to_code(display: str) -> str:
+    """把语言下拉框的显示名解析成评测接口的 language 代码。
+
+    显示名有两种格式：
+      - 「中文名（代码）」如「简体中文（schinese）」
+      - 「中文名·代码」如「西班牙语（拉丁美洲）·latam」（名称本身带括号时用 · 分隔）
+    「全部语言（all）」特殊处理返回 "all"。
+    """
+    if display == "全部语言" or "（all）" in display:
+        return "all"
+    # 优先按 · 分隔（名称带括号的情形）
+    if "·" in display:
+        return display.rsplit("·", 1)[1].strip()
+    # 再按全角括号提取
+    if "（" in display and display.endswith("）"):
+        return display[display.rindex("（") + 1 : -1]
+    # 兜底：无法解析时按常见默认值
+    return "schinese"
+
+
+def _build_lang_values(langs: list[tuple[str, str]]) -> list[str]:
+    """把 [(显示名, 代码)] 拼成下拉框 values 列表，末尾固定带「全部语言」。
+
+    若 langs 为空，返回默认三选项。
+
+    显示名若本身已带括号（如「西班牙语（拉丁美洲）」），
+    则直接拼接代码，避免出现双重括号的冗余观感。
+    """
+    values = []
+    for name, code in langs:
+        if "（" in name:
+            values.append(f"{name}·{code}")
+        else:
+            values.append(f"{name}（{code}）")
+    values.append("全部语言（all）")
+    return values
+
+
 # ---------- 主窗口 ----------
 
 def build_app() -> "tk.Tk":
@@ -284,13 +324,21 @@ def build_app() -> "tk.Tk":
     )
 
     _label(form, "评测语言：", 1)
-    lang_var = tk.StringVar(value="schinese")
+    lang_var = tk.StringVar(value="简体中文（schinese）")
     lang_combo = ttk.Combobox(
-        form, textvariable=lang_var, font=label_font, width=17, state="readonly",
-        values=["schinese（简体中文）", "english（英语）", "all（全部语言）"],
+        form, textvariable=lang_var, font=label_font, width=24, state="readonly",
+        values=["简体中文（schinese）", "英语（english）", "全部语言（all）"],
     )
     lang_combo.current(0)
     lang_combo.grid(row=1, column=1, sticky="w", pady=6)
+
+    # 「刷新语言」按钮：按当前 AppID 拉取游戏支持语种并填充下拉框
+    refresh_lang_btn = tk.Button(
+        form, text="↻ 按游戏刷新语种", bg="#e8f0ea", fg=fg,
+        font=("Microsoft YaHei", 9), relief="flat", cursor="hand2",
+        padx=8, pady=2,
+    )
+    refresh_lang_btn.grid(row=1, column=2, sticky="w", padx=8, pady=6)
 
     _label(form, "时间范围：", 2)
     range_var = tk.StringVar(value="最近30天")
@@ -430,6 +478,41 @@ def build_app() -> "tk.Tk":
     result_path: list[str] = []
     result_data: list = []  # 保存 (title, range_label, results) 供导出
 
+    def _refresh_languages() -> None:
+        """按当前 AppID 拉取游戏支持语种，动态填充语言下拉框。
+
+        成功：下拉框改为「游戏支持语种 + 全部语言」，并尽量保留当前选择；
+        失败：回退为默认三选项，并提示。
+        """
+        raw = appid_var.get().strip()
+        if not raw.isdigit():
+            status_var.set("⚠ 请先填写有效的 AppID，再刷新语种。")
+            return
+        appid = int(raw)
+        status_var.set("正在获取游戏支持的语种...")
+        try:
+            client = SteamClient(api_key=get_api_key())
+            langs = client.get_supported_languages(appid)
+        except Exception as e:  # noqa: BLE001
+            langs = []
+            _log(f"\n[提示] 获取游戏支持语种失败：{e}")
+
+        if langs:
+            lang_combo["values"] = _build_lang_values(langs)
+            # 尽量保留当前选择；若不在新列表里则切到第一项
+            cur = lang_var.get()
+            if cur not in lang_combo["values"]:
+                lang_combo.current(0)
+            _log(f"\n✓ 已获取 {len(langs)} 种游戏支持语种，请在下拉框选择。")
+            status_var.set(f"已加载游戏支持语种（{len(langs)} 种）。")
+        else:
+            lang_combo["values"] = ["简体中文（schinese）", "英语（english）", "全部语言（all）"]
+            lang_combo.current(0)
+            _log("\n[提示] 未能解析游戏支持语种，保留默认语言选项。")
+            status_var.set("未能获取游戏支持语种，保留默认选项。")
+
+    refresh_lang_btn.configure(command=_refresh_languages)
+
     def _on_start() -> None:
         raw = appid_var.get().strip()
         if not raw.isdigit():
@@ -437,12 +520,9 @@ def build_app() -> "tk.Tk":
             return
         appid = int(raw)
 
-        lang_map = {
-            "schinese（简体中文）": "schinese",
-            "english（英语）": "english",
-            "all（全部语言）": "all",
-        }
-        lang = lang_map.get(lang_var.get(), "schinese")
+        # 语言下拉框的显示名 → 语言代码。显示名含代码（如「简体中文（schinese）」），
+        # 这里只取括号里的代码作为接口参数；「全部语言」特殊处理为 "all"。
+        lang = _lang_display_to_code(lang_var.get())
 
         # 解析时间范围
         if range_var.get() == "自定义日期":

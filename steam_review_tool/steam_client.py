@@ -32,6 +32,114 @@ HEADERS = {
     "Accept": "application/json, text/plain, */*",
 }
 
+# 评测接口 language 参数支持的语言代码（Steam 官方标准化代码）。
+# 中文显示名 ↔ Steam API 语言代码。
+# 注意：评测接口的 language 过滤与商店 supported_languages 的语种不是一一对应，
+# 这里只收录 ajaxappreviews / GetAppReviews 实际支持的语言代码。
+LANG_CODE_TO_NAME = {
+    "schinese": "简体中文",
+    "tchinese": "繁体中文",
+    "english": "英语",
+    "japanese": "日语",
+    "korean": "韩语",
+    "french": "法语",
+    "german": "德语",
+    "russian": "俄语",
+    "italian": "意大利语",
+    "spanish": "西班牙语（西班牙）",
+    "latam": "西班牙语（拉丁美洲）",
+    "portuguese": "葡萄牙语",
+    "brazilian": "葡萄牙语（巴西）",
+    "polish": "波兰语",
+    "czech": "捷克语",
+    "dutch": "荷兰语",
+    "turkish": "土耳其语",
+    "ukrainian": "乌克兰语",
+    "vietnamese": "越南语",
+    "thai": "泰语",
+    "indonesian": "印尼语",
+    "swedish": "瑞典语",
+    "danish": "丹麦语",
+    "finnish": "芬兰语",
+    "norwegian": "挪威语",
+    "hungarian": "匈牙利语",
+    "romanian": "罗马尼亚语",
+    "bulgarian": "保加利亚语",
+    "greek": "希腊语",
+    "arabic": "阿拉伯语",
+}
+
+# 商店 appdetails 的 supported_languages 里出现的中文语言名 → 评测接口语言代码。
+# 用于把「游戏支持的语言」映射成可下发给评测接口的 language 参数。
+# 由于 supported_languages 是中文名（如「简体中文」「法语」），需要反查代码。
+LANG_NAME_TO_CODE = {
+    "简体中文": "schinese",
+    "繁体中文": "tchinese",
+    "英语": "english",
+    "日语": "japanese",
+    "韩语": "korean",
+    "法语": "french",
+    "德语": "german",
+    "俄语": "russian",
+    "意大利语": "italian",
+    "西班牙语": "spanish",
+    "西班牙语 - 拉丁美洲": "latam",
+    "葡萄牙语": "portuguese",
+    "葡萄牙语 - 巴西": "brazilian",
+    "波兰语": "polish",
+    "捷克语": "czech",
+    "荷兰语": "dutch",
+    "土耳其语": "turkish",
+    "乌克兰语": "ukrainian",
+    "越南语": "vietnamese",
+    "泰语": "thai",
+    "印尼语": "indonesian",
+    "瑞典语": "swedish",
+    "丹麦语": "danish",
+    "芬兰语": "finnish",
+    "挪威语": "norwegian",
+    "匈牙利语": "hungarian",
+    "罗马尼亚语": "romanian",
+    "保加利亚语": "bulgarian",
+    "希腊语": "greek",
+    "阿拉伯语": "arabic",
+}
+
+# 英文语言名 → 评测接口语言代码（兜底：supported_languages 若返回英文名时使用）。
+LANG_NAME_EN_TO_CODE = {
+    "simplified chinese": "schinese",
+    "traditional chinese": "tchinese",
+    "english": "english",
+    "japanese": "japanese",
+    "korean": "korean",
+    "french": "french",
+    "german": "german",
+    "russian": "russian",
+    "italian": "italian",
+    "spanish": "spanish",
+    "spanish - latin america": "latam",
+    "portuguese": "portuguese",
+    "portuguese - brazil": "brazilian",
+    "brazilian": "brazilian",
+    "polish": "polish",
+    "czech": "czech",
+    "dutch": "dutch",
+    "turkish": "turkish",
+    "ukrainian": "ukrainian",
+    "vietnamese": "vietnamese",
+    "thai": "thai",
+    "indonesian": "indonesian",
+    "swedish": "swedish",
+    "danish": "danish",
+    "finnish": "finnish",
+    "norwegian": "norwegian",
+    "hungarian": "hungarian",
+    "romanian": "romanian",
+    "bulgarian": "bulgarian",
+    "greek": "greek",
+    "arabic": "arabic",
+}
+
 
 class SteamClient:
     def __init__(
@@ -186,6 +294,67 @@ class SteamClient:
             # 游戏信息获取失败不致命：标题降级为 AppID，差评/更新记录照常抓
             pass
         return None
+
+    def get_supported_languages(self, appid: int) -> list[tuple[str, str]]:
+        """解析游戏支持的语言，返回 [(显示名, 语言代码)]。
+
+        从商店 appdetails 的 supported_languages 字段解析出游戏支持的语种，
+        再映射成评测接口可用的 language 代码。
+
+        返回列表已保证按「简体中文 → 英语 → 其它」的常见优先级排序，
+        并始终附带一个「全部语言」(all) 兜底项由调用方处理。
+
+        若接口失败或无法解析，返回空列表（调用方回退为默认三选项）。
+        """
+        import re
+
+        params = {"appids": appid, "l": "schinese", "cc": "cn"}
+        self._throttle()
+        try:
+            resp = self._get(APPDETAIL_API, params=params, timeout=self.timeout)
+            data = resp.json()
+            if not data or str(appid) not in data or not data[str(appid)].get("success"):
+                return []
+            raw = data[str(appid)]["data"].get("supported_languages", "")
+        except (
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.RequestException,
+            ValueError,
+        ):
+            return []
+
+        if not raw:
+            return []
+
+        # 去掉 HTML 标签（<strong>、<br>、</strong> 等）和星号标记
+        text = re.sub(r"<[^>]+>", ",", raw)
+        text = text.replace("*", "")
+        # 按逗号拆分语言列表，清洗空白；
+        # 末尾的说明文字（如「具有完全音频支持的语言」）不属于语言名，需要剔除。
+        names = [s.strip() for s in text.split(",") if s.strip()]
+
+        # 过滤掉非语言名的说明性文字（「具有…」「支持…」等）
+        names = [n for n in names if not re.search(r"(具有|支持|音频|完全)", n)]
+
+        langs: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for name in names:
+            # 兼容中文名与英文名（supported_languages 可能返回两种）
+            lower = name.lower()
+            code = LANG_NAME_TO_CODE.get(name)
+            if code is None:
+                code = LANG_NAME_EN_TO_CODE.get(lower)
+            if code is None:
+                # 尝试去掉「- 拉丁美洲」「- 巴西」等后缀再匹配
+                base = name.split(" - ")[0].strip()
+                code = LANG_NAME_TO_CODE.get(base) or LANG_NAME_EN_TO_CODE.get(base.lower())
+            if code and code not in seen:
+                seen.add(code)
+                # 显示名：优先用映射表里的规范中文名，保证下拉框文案统一
+                display = LANG_CODE_TO_NAME.get(code, name)
+                langs.append((display, code))
+        return langs
 
     def get_news(self, appid: int, count: int = 50, maxlength: int = 2000) -> list[dict]:
         """拉取更新记录 / Patch Notes。需要 API Key。
