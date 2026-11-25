@@ -18,7 +18,7 @@ from tkinter import filedialog, messagebox, ttk
 
 APP_NAME = "Steam差评比对工具"
 APP_EXE_NAME = "Steam差评比对工具.exe"
-VERSION = "1.0.0"
+VERSION = "1.2.0"
 
 
 def _resource_dir() -> str:
