@@ -10,14 +10,24 @@ import os
 CONFIG_FILENAME = "config.local.json"
 
 
-def _config_path() -> str:
-    # 优先取程序所在目录，兼容 PyInstaller 打包后的运行场景
+def _app_dir() -> str:
+    """返回程序所在目录（打包后是 EXE 所在目录，开发时是项目根目录）。
+
+    用于定位配置、报告输出等工作数据，保证「跟随程序位置」而非依赖当前工作目录（cwd）。
+    """
     base = getattr(__import__("sys"), "frozen", False)
     if base:
-        root = os.path.dirname(__import__("sys").executable)
-    else:
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(root, CONFIG_FILENAME)
+        return os.path.dirname(__import__("sys").executable)
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def app_dir() -> str:
+    """公开别名：程序所在目录。"""
+    return _app_dir()
+
+
+def _config_path() -> str:
+    return os.path.join(_app_dir(), CONFIG_FILENAME)
 
 
 def load_config() -> dict:

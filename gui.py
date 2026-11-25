@@ -21,6 +21,7 @@ from steam_review_tool.classifier import (
     generate_replies,
 )
 from steam_review_tool.config import (
+    app_dir,
     get_api_key,
     get_deepseek_key,
     get_llm_model,
@@ -708,9 +709,10 @@ def build_app() -> "tk.Tk":
         progress.start(10)
 
         msg_q: queue.Queue = queue.Queue()
+        outdir = os.path.join(app_dir(), "reports")
         t = threading.Thread(
             target=_fetch_task,
-            args=(appid, lang, date_start, date_end, "reports", llm_config, range_label, lang_label, do_classify, do_localization, steam_key, msg_q),
+            args=(appid, lang, date_start, date_end, outdir, llm_config, range_label, lang_label, do_classify, do_localization, steam_key, msg_q),
             daemon=True,
         )
         t.start()
@@ -771,7 +773,7 @@ def build_app() -> "tk.Tk":
         try:
             path = export_excel(
                 d["results"], d["title"], d["range_label"],
-                lang_label=d.get("lang_label", ""), output_dir="reports",
+                lang_label=d.get("lang_label", ""), output_dir=os.path.join(app_dir(), "reports"),
             )
             status_var.set(f"已导出 Excel：{path}")
             _log(f"\n✓ 已导出 Excel：{path}")
@@ -788,7 +790,7 @@ def build_app() -> "tk.Tk":
         d = result_data[-1]
         try:
             path = write_report(
-                d["results"], d["appid"], d["title"], "reports", "html",
+                d["results"], d["appid"], d["title"], os.path.join(app_dir(), "reports"), "html",
                 range_label=d["range_label"], lang_label=d.get("lang_label", ""),
             )
             result_path.clear()
