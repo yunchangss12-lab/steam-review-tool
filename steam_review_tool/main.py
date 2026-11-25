@@ -1,7 +1,7 @@
 """命令行主入口。
 
 用法：
-    python -m steam_review_tool.main --appid 570 --lang schinese [--start 2026-01-01] [--end 2026-06-30] [--format html]
+    python -m steam_review_tool.main --appid 570 --lang schinese [--start 2026-01-01] [--end 2026-06-30] [--format html] [--check-localization]
 
 参数说明：
     --appid   Steam 游戏 AppID（必填）
@@ -9,6 +9,7 @@
     --start   起始日期（含），格式 YYYY-MM-DD，默认不限
     --end     结束日期（含），格式 YYYY-MM-DD，默认不限
     --format  报告格式：html（默认）/ md
+    --check-localization  额外启用「本地化质量反馈」判断（可选）
 """
 
 import argparse
@@ -46,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--end", default="", help="结束日期 YYYY-MM-DD（含，默认不限）")
     parser.add_argument("--format", default="html", choices=["html", "md"], help="报告格式")
     parser.add_argument("--outdir", default="reports", help="报告输出目录")
+    parser.add_argument("--check-localization", action="store_true", help="额外启用本地化质量反馈判断")
     args = parser.parse_args(argv)
 
     date_start = _parse_date(args.start)
@@ -115,9 +117,11 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("      ⚠ 未启用大模型，归类将全部标为「待确认」")
         print("      （请在 config.local.json 填入 deepseek_api_key）")
-    results = classify_all(reviews, news, llm=llm)
+    if args.check_localization:
+        print("      已启用「本地化质量反馈」判断")
+    results = classify_all(reviews, news, llm=llm, check_localization=args.check_localization)
 
-    # 生成推荐回复文案（已解决/待确认生成，未解决跳过）
+    # 生成推荐回复文案（已解决/待确认/情绪化评论/本地化质量反馈生成，未解决跳过）
     if llm is not None and llm.available:
         from .classifier import generate_replies
         print("      正在生成推荐回复文案（参照官方回复案例）...")
@@ -125,7 +129,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"      已生成 {reply_count} 条推荐回复（未解决不生成）")
 
     range_label = f"{args.start or '不限'}至{args.end or '不限'}" if (args.start or args.end) else ""
-    path = write_report(results, args.appid, title, args.outdir, args.format, range_label=range_label)
+    # 语种标签：从 --lang 参数映射中文名（用于文件名）
+    lang_label = args.lang if args.lang in ("schinese", "english", "all") else args.lang
+    path = write_report(
+        results, args.appid, title, args.outdir, args.format,
+        range_label=range_label, lang_label=lang_label,
+    )
     print(f"\n✓ 完成！报告已生成：{path}")
     print("  双击 HTML 文件即可在浏览器查看，按类别筛选后针对性写开发者回复。")
     return 0

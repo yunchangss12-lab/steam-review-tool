@@ -104,8 +104,11 @@ class LLMClassifier:
     def available(self) -> bool:
         return bool(self.api_key)
 
-    def _chat(self, user_content: str) -> str:
-        """调用大模型对话接口，返回模型文本；带重试。"""
+    def _chat(self, user_content: str, system_prompt: str = "") -> str:
+        """调用大模型对话接口，返回模型文本；带重试。
+
+        system_prompt: 为空则用默认归类提示词，否则用传入的自定义提示词。
+        """
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -113,7 +116,7 @@ class LLMClassifier:
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
             ],
             "temperature": 0.0,  # 判定任务用低温，保证稳定
@@ -152,16 +155,22 @@ class LLMClassifier:
                     time.sleep(1.5 * (attempt + 1))
         raise last_exc  # type: ignore[misc]
 
+    def _chat_with_system(self, system_prompt: str, user_content: str) -> str:
+        """用自定义 system prompt 调用对话接口（兼容旧调用方式）。"""
+        return self._chat(user_content, system_prompt=system_prompt)
+
     def classify_batch(
         self,
         reviews: list[dict],
         news: list[dict],
+        check_localization: bool = False,
     ) -> list[dict]:
         """批量判定一批差评。
 
         reviews: [{"id": int, "text": str, "date": str}]
         news:    [{"idx": int, "title": str, "date": str, "contents": str}]
-        返回:    [{"id": int, "verdict": "已解决|未解决|待确认",
+        check_localization: 是否额外启用「本地化质量反馈」判断（可选）。
+        返回:    [{"id": int, "verdict": "已解决|未解决|待确认|情绪化评论|本地化质量反馈",
                   "news_idx": int|-1, "reason": str}]
         """
         news_block = "\n".join(
@@ -173,6 +182,17 @@ class LLMClassifier:
             f"【差评 {r['id']}】日期 {r['date']}｜内容：{r['text']}" for r in reviews
         )
 
+        verdict_enum = "已解决|未解决|待确认|情绪化评论"
+        localization_rule = ""
+        if check_localization:
+            verdict_enum += "|本地化质量反馈"
+            localization_rule = (
+                "7. 若差评抱怨的是「翻译/本地化质量」问题（例如：翻译错误、错译、漏译、"
+                "文本显示乱码/方框、某语言内容缺失或不完整、术语翻译不统一、语句不通顺/机翻感、"
+                "界面文字未翻译仍显示英文等），应单独判为「本地化质量反馈」——"
+                "这类问题与游戏本身的 bug 修复无关，不要归入已解决/未解决/待确认。\n"
+            )
+
         user_content = (
             "以下是某游戏的全部更新记录（Patch Note）与若干条差评。\n"
             "请逐条判断每条差评反映的具体问题，是否已被某条补丁【真正修复】。\n\n"
@@ -180,11 +200,20 @@ class LLMClassifier:
             f"===== 待判定的差评 =====\n{review_block}\n\n"
             "请输出一个 JSON 对象，格式如下：\n"
             '{"results": ['
-            '{"id": 差评id, "verdict": "已解决|未解决|待确认|情绪化评论", '
+            '{"id": 差评id, "verdict": "' + verdict_enum + '", '
             '"news_idx": 命中的补丁idx或-1, '
-            '"reason": "一句话说明：差评的具体问题，以及补丁里对应的具体修复内容（情绪化评论则说明为何判定为情绪发泄）"}]}'
+            '"reason": "一句话说明：差评的具体问题，以及补丁里对应的具体修复内容（情绪化评论则说明为何判定为情绪发泄；本地化质量反馈则说明具体是哪种翻译问题）"}]}'
         )
-        raw = self._chat(user_content)
+
+        if localization_rule:
+            # 把本地化规则插入系统提示词（在第 6 条规则之后）
+            sys_prompt = SYSTEM_PROMPT.replace(
+                "输出格式：必须只输出一个 JSON 对象，不要输出任何多余文字或代码块标记。",
+                localization_rule + "输出格式：必须只输出一个 JSON 对象，不要输出任何多余文字或代码块标记。",
+            )
+            raw = self._chat_with_system(sys_prompt, user_content)
+        else:
+            raw = self._chat(user_content)
         parsed = _safe_json(raw)
         if not parsed or "results" not in parsed:
             return []
@@ -236,6 +265,13 @@ class LLMClassifier:
                 "请据此撰写回复：以安抚情绪为主，态度诚恳、表达歉意与理解，"
                 "感谢玩家关注并邀请继续游玩/提出建议即可。"
                 "【不要】主动让玩家反馈 bug、不要引导提交问题详情、不要提及客服排查。"
+            )
+        elif category == "本地化质量反馈":
+            instruction = (
+                "这条差评反映的是翻译/本地化质量问题（如错译、漏译、乱码、语言不完整等）。"
+                "请据此撰写回复：先感谢玩家指出问题、表达歉意，再表示会把问题转达给本地化团队"
+                "尽快修正，并欢迎继续反馈其他翻译问题。"
+                "语气诚恳、专业，体现对本地化质量的重视。"
             )
         else:  # 待确认
             instruction = (

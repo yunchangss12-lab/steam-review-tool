@@ -47,12 +47,16 @@ def _fetch_task(
     outdir: str,
     llm_config: dict,
     range_label: str,
+    lang_label: str,
+    check_localization: bool,
     msg_q: queue.Queue,
 ) -> None:
     """在后台线程里执行完整抓取+比对，进度经 msg_q 回传主线程。
 
     llm_config: {"enabled": bool, "api_key": str, "base_url": str, "model": str}
     range_label: 时间段文案（用于日志与文件名）。
+    lang_label: 语种文案（用于文件名）。
+    check_localization: 是否启用「本地化质量反馈」判断。
     """
     try:
         client = SteamClient(api_key=get_api_key())
@@ -123,9 +127,14 @@ def _fetch_task(
         else:
             msg_q.put(("log", "      ⚠ 未启用大模型，归类将全部标为「待确认」"))
             msg_q.put(("log", "      （在界面「大模型(可选)」区勾选并填写 API Key 即可启用）"))
-        results = classify_all(reviews, news, llm=llm)
+        if check_localization:
+            msg_q.put(("log", "      已启用「本地化质量反馈」判断（识别翻译/本地化相关的差评）"))
+        results = classify_all(reviews, news, llm=llm, check_localization=check_localization)
 
-        path = write_report(results, appid, title, outdir, "html", range_label=range_label)
+        path = write_report(
+            results, appid, title, outdir, "html",
+            range_label=range_label, lang_label=lang_label,
+        )
 
         counts = summarize(results)
         msg_q.put(("done", {
@@ -135,6 +144,7 @@ def _fetch_task(
             "total": len(results),
             "results": results,  # 供导出 Excel / 生成回复使用
             "range_label": range_label,
+            "lang_label": lang_label,
             "appid": appid,
             "llm_config": llm_config,
         }))
@@ -254,6 +264,26 @@ def _lang_display_to_code(display: str) -> str:
         return display[display.rindex("（") + 1 : -1]
     # 兜底：无法解析时按常见默认值
     return "schinese"
+
+
+def _lang_display_to_label(display: str) -> str:
+    """从语言下拉框的显示名提取「语种中文名」，用于文件名。
+
+    显示名格式如「简体中文（schinese）」「西班牙语（拉丁美洲）·latam」「全部语言（all）」，
+    这里取括号/分隔符前面的中文名部分。
+    """
+    if not display:
+        return ""
+    # 全部语言 → 标签「全部语言」
+    if display == "全部语言" or "（all）" in display:
+        return "全部语言"
+    # 按 · 分隔（名称本身带括号的情形，如「西班牙语（拉丁美洲）·latam」）
+    if "·" in display:
+        return display.rsplit("·", 1)[0].strip()
+    # 按全角括号分隔（如「简体中文（schinese）」）
+    if "（" in display:
+        return display[: display.index("（")].strip()
+    return display.strip()
 
 
 def _build_lang_values(langs: list[tuple[str, str]]) -> list[str]:
@@ -425,6 +455,18 @@ def build_app() -> "tk.Tk":
         bg=card, fg=sub, font=("Microsoft YaHei", 8),
     ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
+    # 本地化质量判断（可选，依赖大模型）
+    loc_card = tk.Frame(root, bg=card)
+    loc_card.pack(fill="x", padx=16, pady=(0, 8))
+    check_localization_var = tk.BooleanVar(value=False)
+    loc_check = tk.Checkbutton(
+        loc_card,
+        text="启用本地化质量判断（识别差评是否与翻译/本地化质量相关，单独归入「本地化质量反馈」分类）",
+        variable=check_localization_var, bg=card, fg=fg, font=label_font,
+        activebackground=card, anchor="w", cursor="hand2",
+    )
+    loc_check.pack(fill="x", padx=16, pady=10)
+
     # 按钮区
     btn_row = tk.Frame(root, bg=bg)
     btn_row.pack(fill="x", padx=16, pady=(0, 8))
@@ -533,6 +575,11 @@ def build_app() -> "tk.Tk":
         # 语言下拉框的显示名 → 语言代码。显示名含代码（如「简体中文（schinese）」），
         # 这里只取括号里的代码作为接口参数；「全部语言」特殊处理为 "all"。
         lang = _lang_display_to_code(lang_var.get())
+        # 语种中文名（用于文件名）
+        lang_label = _lang_display_to_label(lang_var.get())
+
+        # 本地化质量判断（可选）
+        check_localization = bool(check_localization_var.get())
 
         # 解析时间范围
         if range_var.get() == "自定义日期":
@@ -584,7 +631,7 @@ def build_app() -> "tk.Tk":
         msg_q: queue.Queue = queue.Queue()
         t = threading.Thread(
             target=_fetch_task,
-            args=(appid, lang, date_start, date_end, "reports", llm_config, range_label, msg_q),
+            args=(appid, lang, date_start, date_end, "reports", llm_config, range_label, lang_label, check_localization, msg_q),
             daemon=True,
         )
         t.start()
@@ -604,6 +651,7 @@ def build_app() -> "tk.Tk":
                         result_data.append({
                             "title": payload["title"],
                             "range_label": payload.get("range_label", ""),
+                            "lang_label": payload.get("lang_label", ""),
                             "results": payload["results"],
                             "appid": payload.get("appid"),
                             "llm_config": payload.get("llm_config", {}),
@@ -612,7 +660,7 @@ def build_app() -> "tk.Tk":
                         _log("")
                         _log("=" * 50)
                         _log(f"✓ 完成！游戏：{payload['title']}")
-                        _log(f"  已解决 {c['已解决']} 条 · 未解决 {c['未解决']} 条 · 情绪化评论 {c.get('情绪化评论', 0)} 条 · 待确认 {c['待确认']} 条 · 合计 {payload['total']} 条")
+                        _log(f"  已解决 {c['已解决']} 条 · 未解决 {c['未解决']} 条 · 情绪化评论 {c.get('情绪化评论', 0)} 条 · 本地化质量反馈 {c.get('本地化质量反馈', 0)} 条 · 待确认 {c['待确认']} 条 · 合计 {payload['total']} 条")
                         _log(f"  报告文件：{payload['path']}")
                         _log("  点击「打开报告」在浏览器查看，或「导出 Excel」保存为表格。")
                         status_var.set("完成！可点击「打开报告」或「导出 Excel」。")
@@ -642,7 +690,10 @@ def build_app() -> "tk.Tk":
         from steam_review_tool.excel_exporter import export_excel
         d = result_data[-1]
         try:
-            path = export_excel(d["results"], d["title"], d["range_label"], "reports")
+            path = export_excel(
+                d["results"], d["title"], d["range_label"],
+                lang_label=d.get("lang_label", ""), output_dir="reports",
+            )
             status_var.set(f"已导出 Excel：{path}")
             _log(f"\n✓ 已导出 Excel：{path}")
         except Exception as e:  # noqa: BLE001
@@ -659,7 +710,7 @@ def build_app() -> "tk.Tk":
         try:
             path = write_report(
                 d["results"], d["appid"], d["title"], "reports", "html",
-                range_label=d["range_label"],
+                range_label=d["range_label"], lang_label=d.get("lang_label", ""),
             )
             result_path.clear()
             result_path.append(os.path.abspath(path))
@@ -678,7 +729,7 @@ def build_app() -> "tk.Tk":
         # 判断是否有可生成回复的条目（非「未解决」）
         genable = [r for r in results if r.category != "未解决"]
         if not genable:
-            _log("  （无「已解决/情绪化评论/待确认」的差评，跳过生成推荐回复）")
+            _log("  （无「已解决/情绪化评论/本地化质量反馈/待确认」的差评，跳过生成推荐回复）")
             return
 
         # 记录是否已启用大模型
@@ -866,7 +917,7 @@ def build_app() -> "tk.Tk":
             head.pack(fill="x", padx=12, pady=(10, 2))
             # 差评摘要 + 类别标签
             summary = r.review.review_text.strip().replace("\n", " ")[:60]
-            tag_color = {"已解决": "#1e9b50", "未解决": "#c0392b", "情绪化评论": "#7b1fa2", "待确认": "#e67e22"}.get(r.category, "#666")
+            tag_color = {"已解决": "#1e9b50", "未解决": "#c0392b", "情绪化评论": "#7b1fa2", "本地化质量反馈": "#1565c0", "待确认": "#e67e22"}.get(r.category, "#666")
             tk.Label(
                 head, text=f"[{r.category}] {summary}", bg=card, fg=fg,
                 font=("Microsoft YaHei", 9, "bold"), anchor="w",

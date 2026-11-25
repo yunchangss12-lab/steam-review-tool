@@ -40,6 +40,7 @@ def export_excel(
     results: list[ClassifiedReview],
     title: str,
     range_label: str = "",
+    lang_label: str = "",
     output_dir: str = "reports",
 ) -> str:
     """把归类结果导出为 Excel，按类别分 sheet。返回导出文件路径。"""
@@ -63,11 +64,12 @@ def export_excel(
         "已解决": "2e7d32",  # 绿
         "未解决": "d32f2f",  # 红
         "情绪化评论": "7b1fa2",  # 紫
+        "本地化质量反馈": "1565c0",  # 蓝
         "待确认": "f57f17",  # 橙
     }
 
     # 每个类别的行数据
-    categories = ["已解决", "未解决", "情绪化评论", "待确认"]
+    categories = ["已解决", "未解决", "情绪化评论", "本地化质量反馈", "待确认"]
     for cat in categories:
         group = [r for r in results if r.category == cat]
         ws = wb.create_sheet(title=cat)
@@ -119,9 +121,11 @@ def export_excel(
             ws.column_dimensions[get_column_letter(idx)].width = w
         ws.freeze_panes = "A2"  # 冻结表头
 
-    # 组装文件名：{游戏名}_{时间段}_{日期}_{差评总数}.xlsx
+    # 组装文件名：{游戏名}_{语种}_{时间段}_{日期}_{差评总数}.xlsx
     ts = dt.datetime.now().strftime("%Y%m%d")
     parts = [_safe_filename(title)]
+    if lang_label:
+        parts.append(_safe_filename(lang_label))
     if range_label:
         parts.append(_safe_filename(range_label))
     parts.append(ts)
