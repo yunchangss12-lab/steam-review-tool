@@ -319,9 +319,8 @@ def build_app() -> "tk.Tk":
 
     _label(form, "游戏 AppID：", 0)
     appid_var = tk.StringVar(value="2445690")
-    tk.Entry(form, textvariable=appid_var, font=label_font, width=20).grid(
-        row=0, column=1, sticky="w", pady=6
-    )
+    appid_entry = tk.Entry(form, textvariable=appid_var, font=label_font, width=20)
+    appid_entry.grid(row=0, column=1, sticky="w", pady=6)
 
     _label(form, "评测语言：", 1)
     lang_var = tk.StringVar(value="简体中文（schinese）")
@@ -332,13 +331,11 @@ def build_app() -> "tk.Tk":
     lang_combo.current(0)
     lang_combo.grid(row=1, column=1, sticky="w", pady=6)
 
-    # 「刷新语言」按钮：按当前 AppID 拉取游戏支持语种并填充下拉框
-    refresh_lang_btn = tk.Button(
-        form, text="↻ 按游戏刷新语种", bg="#e8f0ea", fg=fg,
-        font=("Microsoft YaHei", 9), relief="flat", cursor="hand2",
-        padx=8, pady=2,
-    )
-    refresh_lang_btn.grid(row=1, column=2, sticky="w", padx=8, pady=6)
+    # 提示：语言列表会按 AppID 自动刷新
+    tk.Label(
+        form, text="输入 AppID 后自动加载该游戏支持的语种",
+        bg=card, fg=sub, font=("Microsoft YaHei", 8),
+    ).grid(row=1, column=2, sticky="w", padx=8, pady=6)
 
     _label(form, "时间范围：", 2)
     range_var = tk.StringVar(value="最近30天")
@@ -478,17 +475,26 @@ def build_app() -> "tk.Tk":
     result_path: list[str] = []
     result_data: list = []  # 保存 (title, range_label, results) 供导出
 
+    # 记录上次已加载语言列表的 AppID，用于去重
+    _loaded_lang_appid: list[int] = [-1]
+
     def _refresh_languages() -> None:
         """按当前 AppID 拉取游戏支持语种，动态填充语言下拉框。
 
         成功：下拉框改为「游戏支持语种 + 全部语言」，并尽量保留当前选择；
         失败：回退为默认三选项，并提示。
+
+        通过「上次已加载的 AppID」做去重：AppID 未变时跳过请求，
+        避免每次失焦都重复拉取。
         """
         raw = appid_var.get().strip()
         if not raw.isdigit():
-            status_var.set("⚠ 请先填写有效的 AppID，再刷新语种。")
             return
         appid = int(raw)
+        # 去重：同一 AppID 已加载过则跳过
+        if appid == _loaded_lang_appid[0]:
+            return
+
         status_var.set("正在获取游戏支持的语种...")
         try:
             client = SteamClient(api_key=get_api_key())
@@ -497,6 +503,7 @@ def build_app() -> "tk.Tk":
             langs = []
             _log(f"\n[提示] 获取游戏支持语种失败：{e}")
 
+        _loaded_lang_appid[0] = appid
         if langs:
             lang_combo["values"] = _build_lang_values(langs)
             # 尽量保留当前选择；若不在新列表里则切到第一项
@@ -511,7 +518,10 @@ def build_app() -> "tk.Tk":
             _log("\n[提示] 未能解析游戏支持语种，保留默认语言选项。")
             status_var.set("未能获取游戏支持语种，保留默认选项。")
 
-    refresh_lang_btn.configure(command=_refresh_languages)
+    # AppID 输入框失焦时自动刷新语言列表
+    appid_entry.bind("<FocusOut>", lambda _e: _refresh_languages())
+    # 回车也触发（用户输入 AppID 后直接按回车）
+    appid_entry.bind("<Return>", lambda _e: _refresh_languages())
 
     def _on_start() -> None:
         raw = appid_var.get().strip()
