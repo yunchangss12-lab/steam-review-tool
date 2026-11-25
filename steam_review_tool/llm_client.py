@@ -163,14 +163,15 @@ class LLMClassifier:
         self,
         reviews: list[dict],
         news: list[dict],
-        check_localization: bool = False,
     ) -> list[dict]:
-        """批量判定一批差评。
+        """批量判定一批差评（纯四分类：已解决/未解决/情绪化评论/待确认）。
+
+        与「本地化质量判断」完全分离——本方法只判断「差评问题 ↔ 补丁修复」的
+        对应关系，不涉及本地化维度（本地化由 check_localization_batch 独立处理）。
 
         reviews: [{"id": int, "text": str, "date": str}]
         news:    [{"idx": int, "title": str, "date": str, "contents": str}]
-        check_localization: 是否额外启用「本地化质量反馈」判断（可选）。
-        返回:    [{"id": int, "verdict": "已解决|未解决|待确认|情绪化评论|本地化质量反馈",
+        返回:    [{"id": int, "verdict": "已解决|未解决|待确认|情绪化评论",
                   "news_idx": int|-1, "reason": str}]
         """
         news_block = "\n".join(
@@ -182,17 +183,6 @@ class LLMClassifier:
             f"【差评 {r['id']}】日期 {r['date']}｜内容：{r['text']}" for r in reviews
         )
 
-        verdict_enum = "已解决|未解决|待确认|情绪化评论"
-        localization_rule = ""
-        if check_localization:
-            verdict_enum += "|本地化质量反馈"
-            localization_rule = (
-                "7. 若差评抱怨的是「翻译/本地化质量」问题（例如：翻译错误、错译、漏译、"
-                "文本显示乱码/方框、某语言内容缺失或不完整、术语翻译不统一、语句不通顺/机翻感、"
-                "界面文字未翻译仍显示英文等），应单独判为「本地化质量反馈」——"
-                "这类问题与游戏本身的 bug 修复无关，不要归入已解决/未解决/待确认。\n"
-            )
-
         user_content = (
             "以下是某游戏的全部更新记录（Patch Note）与若干条差评。\n"
             "请逐条判断每条差评反映的具体问题，是否已被某条补丁【真正修复】。\n\n"
@@ -200,20 +190,59 @@ class LLMClassifier:
             f"===== 待判定的差评 =====\n{review_block}\n\n"
             "请输出一个 JSON 对象，格式如下：\n"
             '{"results": ['
-            '{"id": 差评id, "verdict": "' + verdict_enum + '", '
+            '{"id": 差评id, "verdict": "已解决|未解决|待确认|情绪化评论", '
             '"news_idx": 命中的补丁idx或-1, '
-            '"reason": "一句话说明：差评的具体问题，以及补丁里对应的具体修复内容（情绪化评论则说明为何判定为情绪发泄；本地化质量反馈则说明具体是哪种翻译问题）"}]}'
+            '"reason": "一句话说明：差评的具体问题，以及补丁里对应的具体修复内容（情绪化评论则说明为何判定为情绪发泄）"}]}'
+        )
+        raw = self._chat(user_content)
+        parsed = _safe_json(raw)
+        if not parsed or "results" not in parsed:
+            return []
+        return parsed["results"]
+
+    def check_localization_batch(
+        self,
+        reviews: list[dict],
+    ) -> list[dict]:
+        """批量判断一批差评是否为「本地化/翻译质量」问题（独立流程，不依赖补丁）。
+
+        与方法 classify_batch 完全分离：本方法只关心「这条差评是否在抱怨
+        翻译/本地化质量」，不涉及「差评问题是否被补丁修复」，因此不需要
+        传补丁，能节省 token（尤其是补丁正文很长时）。
+
+        reviews: [{"id": int, "text": str, "date": str}]
+        返回:    [{"id": int, "is_localization": bool,
+                  "reason": str 具体是哪种翻译问题（非本地化则为空）}]
+        """
+        review_block = "\n".join(
+            f"【差评 {r['id']}】日期 {r['date']}｜内容：{r['text']}" for r in reviews
         )
 
-        if localization_rule:
-            # 把本地化规则插入系统提示词（在第 6 条规则之后）
-            sys_prompt = SYSTEM_PROMPT.replace(
-                "输出格式：必须只输出一个 JSON 对象，不要输出任何多余文字或代码块标记。",
-                localization_rule + "输出格式：必须只输出一个 JSON 对象，不要输出任何多余文字或代码块标记。",
-            )
-            raw = self._chat_with_system(sys_prompt, user_content)
-        else:
-            raw = self._chat(user_content)
+        loc_system_prompt = (
+            "你是一名游戏本地化（LQA）质量助手，负责判断一条 Steam 差评是否在抱怨"
+            "「翻译/本地化质量」问题。\n"
+            "判定原则：\n"
+            "1. 只有当差评明确抱怨翻译/本地化相关的问题时，才判 is_localization=true，"
+            "例如：翻译错误、错译、漏译、术语翻译不统一、语句不通顺/有明显机翻感、"
+            "文本显示乱码/方框、某语言内容缺失或不完整、界面文字未翻译仍显示英文、"
+            "配音与字幕不一致等。\n"
+            "2. 差评抱怨的是游戏玩法、bug、闪退、平衡、氪金、网络、画风、运营等"
+            "与翻译无关的问题时，判 is_localization=false。\n"
+            "3. 差评里只是「顺带」提了一句语言（如用外语写差评本身）但不涉及翻译质量，"
+            "判 is_localization=false。\n"
+            "输出格式：必须只输出一个 JSON 对象，格式为 "
+            '{"results": [{"id": 差评id, "is_localization": true或false, '
+            '"reason": "若是本地化问题，说明具体是哪种翻译问题；否则为空字符串"}]}，'
+            "不要输出任何多余文字或代码块标记。"
+        )
+
+        user_content = (
+            "以下是若干条 Steam 差评。请逐条判断其是否在抱怨「翻译/本地化质量」问题。\n\n"
+            f"===== 待判断的差评 =====\n{review_block}\n\n"
+            "请输出 JSON 对象。"
+        )
+
+        raw = self._chat_with_system(loc_system_prompt, user_content)
         parsed = _safe_json(raw)
         if not parsed or "results" not in parsed:
             return []

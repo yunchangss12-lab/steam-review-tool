@@ -124,11 +124,17 @@ def classify_all(
     batch_size: int = 10,
     check_localization: bool = False,
 ) -> list[ClassifiedReview]:
-    """对全部差评做归类。
+    """对全部差评做归类（可选：额外的本地化质量判断）。
 
     llm: 已初始化的大模型分类器。若为 None 或不可用，则走保守本地降级。
     news_items 全部参与匹配（不限时间段——补丁修复不区分差评前后）。
+
     check_localization: 是否额外启用「本地化质量反馈」判断（可选）。
+        —— 注意：本地化判断与「差评↔补丁修复」归类是完全分离的两条流程：
+          1) 先做四分类归类（差评问题 ↔ 补丁修复，需要补丁正文）
+          2) 若勾选本地化判断，再独立跑一遍本地化判断（只看差评文本，
+             不需要补丁，节省 token），把判定为本地化问题的差评覆盖为
+             「本地化质量反馈」分类。
     """
     # 排序补丁（升序），便于后续按差评时间过滤
     news_sorted = sorted(news_items, key=lambda n: n.date)
@@ -138,15 +144,67 @@ def classify_all(
     # 若大模型可用，走语义精判
     if llm is not None and llm.available:
         try:
-            return _classify_with_llm(
-                reviews, news_candidates, llm, batch_size,
-                check_localization=check_localization,
-            )
+            results = _classify_with_llm(reviews, news_candidates, llm, batch_size)
         except Exception as e:
             # 大模型调用失败 → 降级到保守本地规则，并附上失败原因
-            return _classify_fallback(reviews, news_candidates, reason=str(e))
+            results = _classify_fallback(reviews, news_candidates, reason=str(e))
+    else:
+        results = _classify_fallback(reviews, news_candidates)
 
-    return _classify_fallback(reviews, news_candidates)
+    # 独立的本地化质量判断（可选，与归类分离，不重跑归类）
+    if check_localization and llm is not None and llm.available:
+        results = _apply_localization_pass(results, llm, batch_size)
+
+    return results
+
+
+def _apply_localization_pass(
+    results: list[ClassifiedReview],
+    llm: LLMClassifier,
+    batch_size: int,
+) -> list[ClassifiedReview]:
+    """独立的本地化质量判断流程：只看差评文本，判断是否翻译/本地化问题。
+
+    与「差评↔补丁修复」归类完全分离，不依赖补丁，节省 token。
+    对判定为本地化问题的差评，覆盖其分类为「本地化质量反馈」。
+    """
+    # 构造 LLM 入参（复用 id 与 text）
+    review_dicts = []
+    for i, r in enumerate(results):
+        review_dicts.append({
+            "id": i,
+            "text": r.review.review_text,
+            "date": r.review.created_dt.strftime("%Y-%m-%d"),
+        })
+
+    loc_flags: dict[int, dict] = {}
+    for start in range(0, len(review_dicts), batch_size):
+        batch = review_dicts[start:start + batch_size]
+        try:
+            parsed = llm.check_localization_batch(batch)
+        except Exception:
+            parsed = []
+        if not parsed:
+            # 该批判断失败：不做覆盖（保留原归类结果）
+            continue
+        for res in parsed:
+            rid = res.get("id")
+            if rid is None:
+                continue
+            loc_flags[int(rid)] = {
+                "is_localization": bool(res.get("is_localization", False)),
+                "reason": str(res.get("reason", "")),
+            }
+
+    # 覆盖：判定为本地化问题的差评 → 分类改为「本地化质量反馈」
+    for i, r in enumerate(results):
+        flag = loc_flags.get(i)
+        if flag and flag["is_localization"]:
+            r.category = "本地化质量反馈"
+            r.matched_news = []
+            r.matches = []
+            r.reason = flag["reason"] or r.reason
+    return results
 
 
 def _classify_with_llm(
@@ -154,9 +212,8 @@ def _classify_with_llm(
     news_sorted: list[NewsItem],
     llm: LLMClassifier,
     batch_size: int,
-    check_localization: bool = False,
 ) -> list[ClassifiedReview]:
-    """大模型语义精判（分批调用，避免单次请求过长）。"""
+    """大模型语义精判（分批调用，避免单次请求过长）。纯四分类，不含本地化。"""
     review_dicts = build_review_dicts(reviews)
     news_dicts = build_news_dicts(news_sorted)
     # news_dicts 的 idx 对应 news_sorted 的下标
@@ -166,7 +223,7 @@ def _classify_with_llm(
     for start in range(0, len(review_dicts), batch_size):
         batch = review_dicts[start:start + batch_size]
         try:
-            results = llm.classify_batch(batch, news_dicts, check_localization=check_localization)
+            results = llm.classify_batch(batch, news_dicts)
         except Exception:
             results = []
         if not results:
@@ -189,7 +246,7 @@ def _classify_with_llm(
             }
 
     # 汇总为 ClassifiedReview
-    valid = ("已解决", "未解决", "待确认", "情绪化评论", "本地化质量反馈")
+    valid = ("已解决", "未解决", "待确认", "情绪化评论")
     out: list[ClassifiedReview] = []
     for i, review in enumerate(reviews):
         v = verdicts.get(i)

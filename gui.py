@@ -128,11 +128,13 @@ def _fetch_task(
             msg_q.put(("log", "      ⚠ 未启用大模型，归类将全部标为「待确认」"))
             msg_q.put(("log", "      （在界面「大模型(可选)」区勾选并填写 API Key 即可启用）"))
         if check_localization:
-            msg_q.put(("log", "      已启用「本地化质量反馈」判断（识别翻译/本地化相关的差评）"))
             if llm is None:
-                # 本地化判断依赖大模型，但当前未配置/未启用大模型 → 明确提示
+                # 本地化判断依赖大模型，但当前未启用大模型 → 明确提示
                 msg_q.put(("log", "      ⚠ 本地化质量判断依赖大模型，但未启用大模型或缺少 API Key。"))
-                msg_q.put(("log", "      （请在上方勾选「启用大模型语义判断」并填写 API Key，否则无法识别本地化问题）"))
+                msg_q.put(("log", "      （请勾选「启用大模型语义判断」并填写 API Key，否则无法识别本地化问题）"))
+            else:
+                # 分离说明：归类与本地化判断是两条独立流程，各调用一次大模型
+                msg_q.put(("log", "      已启用「本地化质量反馈」判断（独立流程，仅分析差评文本，不重复比对补丁）"))
         results = classify_all(reviews, news, llm=llm, check_localization=check_localization)
 
         path = write_report(
