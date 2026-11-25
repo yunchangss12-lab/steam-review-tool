@@ -270,9 +270,9 @@ def _lang_display_to_code(display: str) -> str:
     显示名有两种格式：
       - 「中文名（代码）」如「简体中文（schinese）」
       - 「中文名·代码」如「西班牙语（拉丁美洲）·latam」（名称本身带括号时用 · 分隔）
-    「全部语言（all）」特殊处理返回 "all"。
+    「全部语言」特殊处理返回 "all"（文案形如「全部语言（all·不区分语种）」）。
     """
-    if display == "全部语言" or "（all）" in display:
+    if display == "全部语言" or "（all" in display:
         return "all"
     # 优先按 · 分隔（名称带括号的情形）
     if "·" in display:
@@ -287,13 +287,13 @@ def _lang_display_to_code(display: str) -> str:
 def _lang_display_to_label(display: str) -> str:
     """从语言下拉框的显示名提取「语种中文名」，用于文件名。
 
-    显示名格式如「简体中文（schinese）」「西班牙语（拉丁美洲）·latam」「全部语言（all）」，
+    显示名格式如「简体中文（schinese）」「西班牙语（拉丁美洲）·latam」「全部语言（all·不区分语种）」，
     这里取括号/分隔符前面的中文名部分。
     """
     if not display:
         return ""
     # 全部语言 → 标签「全部语言」
-    if display == "全部语言" or "（all）" in display:
+    if display == "全部语言" or "（all" in display:
         return "全部语言"
     # 按 · 分隔（名称本身带括号的情形，如「西班牙语（拉丁美洲）·latam」）
     if "·" in display:
@@ -311,6 +311,8 @@ def _build_lang_values(langs: list[tuple[str, str]]) -> list[str]:
 
     显示名若本身已带括号（如「西班牙语（拉丁美洲）」），
     则直接拼接代码，避免出现双重括号的冗余观感。
+
+    「全部语言」用特殊文案强调其「无差别抓取所有语言差评」的语义。
     """
     values = []
     for name, code in langs:
@@ -318,7 +320,7 @@ def _build_lang_values(langs: list[tuple[str, str]]) -> list[str]:
             values.append(f"{name}·{code}")
         else:
             values.append(f"{name}（{code}）")
-    values.append("全部语言（all）")
+    values.append("全部语言（all·不区分语种）")
     return values
 
 
@@ -373,36 +375,46 @@ def build_app() -> "tk.Tk":
     _label(form, "评测语言：", 1)
     lang_var = tk.StringVar(value="简体中文（schinese）")
     lang_combo = ttk.Combobox(
-        form, textvariable=lang_var, font=label_font, width=24, state="readonly",
-        values=["简体中文（schinese）", "英语（english）", "全部语言（all）"],
+        form, textvariable=lang_var, font=label_font, width=26, state="readonly",
+        values=["简体中文（schinese）", "英语（english）", "全部语言（all·不区分语种）"],
     )
     lang_combo.current(0)
     lang_combo.grid(row=1, column=1, sticky="w", pady=6)
 
-    # 提示：语言列表会按 AppID 自动刷新
-    tk.Label(
-        form, text="输入 AppID 后自动加载该游戏支持的语种",
-        bg=card, fg=sub, font=("Microsoft YaHei", 8),
-    ).grid(row=1, column=2, sticky="w", padx=8, pady=6)
+    # 醒目提示：语言列表会按 AppID 自动刷新（带图标 + 强调色）
+    lang_hint_var = tk.StringVar(value="💡 输入 AppID 后按回车（或点击下方按钮）自动加载该游戏支持的语种")
+    lang_hint = tk.Label(
+        form, textvariable=lang_hint_var,
+        bg=card, fg="#b26a00", font=("Microsoft YaHei", 8, "bold"),
+    )
+    lang_hint.grid(row=2, column=1, columnspan=2, sticky="w", padx=(0, 8), pady=(0, 2))
 
-    _label(form, "时间范围：", 2)
+    # 「刷新语种」按钮：给用户明确的主动触发入口
+    refresh_lang_btn = tk.Button(
+        form, text="↻ 刷新语种", bg="#e8f0ea", fg="#1e9b50",
+        font=("Microsoft YaHei", 9, "bold"), relief="flat", cursor="hand2",
+        padx=10, pady=2,
+    )
+    refresh_lang_btn.grid(row=1, column=2, sticky="w", padx=8, pady=6)
+
+    _label(form, "时间范围：", 3)
     range_var = tk.StringVar(value="最近30天")
     range_combo = ttk.Combobox(
         form, textvariable=range_var, font=label_font, width=17, state="readonly",
         values=["最近7天", "最近30天", "最近90天", "最近半年", "最近一年", "全部时间", "自定义日期"],
     )
     range_combo.current(1)
-    range_combo.grid(row=2, column=1, sticky="w", pady=6)
+    range_combo.grid(row=3, column=1, sticky="w", pady=6)
 
     tk.Label(
         form,
         text="按时间段筛选差评，可针对性查看某版本更新前后的反馈",
         bg=card, fg=sub, font=("Microsoft YaHei", 8),
-    ).grid(row=3, column=1, sticky="w", padx=(0, 16), pady=(0, 8))
+    ).grid(row=4, column=1, sticky="w", padx=(0, 16), pady=(0, 8))
 
     # 自定义日期行（默认隐藏，选「自定义日期」时显示）
     date_frame = tk.Frame(form, bg=card)
-    date_frame.grid(row=4, column=0, columnspan=2, sticky="w", padx=(16, 16), pady=(0, 10))
+    date_frame.grid(row=5, column=0, columnspan=2, sticky="w", padx=(16, 16), pady=(0, 10))
     tk.Label(date_frame, text="起：", bg=card, fg=fg, font=label_font).pack(side="left")
     date_start_var = tk.StringVar(value="")
     date_start_entry = tk.Entry(date_frame, textvariable=date_start_var, font=label_font, width=12)
@@ -553,12 +565,15 @@ def build_app() -> "tk.Tk":
         """
         raw = appid_var.get().strip()
         if not raw.isdigit():
+            lang_hint_var.set("⚠ 请先填写有效的 AppID（纯数字），再刷新语种")
             return
         appid = int(raw)
         # 去重：同一 AppID 已加载过则跳过
         if appid == _loaded_lang_appid[0]:
+            lang_hint_var.set("✓ 已加载该游戏支持的语种，可在下拉框选择")
             return
 
+        lang_hint_var.set("⏳ 正在获取该游戏支持的语种...")
         status_var.set("正在获取游戏支持的语种...")
         try:
             client = SteamClient(api_key=get_api_key())
@@ -575,13 +590,17 @@ def build_app() -> "tk.Tk":
             if cur not in lang_combo["values"]:
                 lang_combo.current(0)
             _log(f"\n✓ 已获取 {len(langs)} 种游戏支持语种，请在下拉框选择。")
+            lang_hint_var.set(f"✓ 已加载 {len(langs)} 种语种；如需抓取所有语言的差评，请选末尾「全部语言」")
             status_var.set(f"已加载游戏支持语种（{len(langs)} 种）。")
         else:
-            lang_combo["values"] = ["简体中文（schinese）", "英语（english）", "全部语言（all）"]
+            lang_combo["values"] = ["简体中文（schinese）", "英语（english）", "全部语言（all·不区分语种）"]
             lang_combo.current(0)
             _log("\n[提示] 未能解析游戏支持语种，保留默认语言选项。")
+            lang_hint_var.set("⚠ 未能解析语种，保留默认选项（含「全部语言」可抓取所有语言）")
             status_var.set("未能获取游戏支持语种，保留默认选项。")
 
+    # 绑定「刷新语种」按钮（明确的主动触发入口）
+    refresh_lang_btn.configure(command=_refresh_languages)
     # AppID 输入框失焦时自动刷新语言列表
     appid_entry.bind("<FocusOut>", lambda _e: _refresh_languages())
     # 回车也触发（用户输入 AppID 后直接按回车）
